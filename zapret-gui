@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Открывает окно приложения. Если графических библиотек нет, объясняет, что делать: человек запустил это из меню
+Z_HOME="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+export PYTHONDONTWRITEBYTECODE=1
+
+if python3 -c "import gi; gi.require_version('Gtk', '4.0'); gi.require_version('Adw', '1'); from gi.repository import Gtk, Adw" 2>/dev/null; then
+	exec python3 "$Z_HOME/gui/main.py" "$@"
+fi
+
+text="Для окна приложения нужны Python, GTK 4 и libadwaita. Установите пакеты python3-gi, gir1.2-gtk-4.0 и gir1.2-adw-1 (названия для Ubuntu и Debian) или запустите установку ещё раз. Пока можно пользоваться меню в терминале: команда zapret."
+echo "$text" >&2
+if command -v zenity >/dev/null 2>&1; then
+	zenity --error --title="Zapret Cap" --text="$text" 2>/dev/null
+elif command -v kdialog >/dev/null 2>&1; then
+	kdialog --error "$text" 2>/dev/null
+elif command -v notify-send >/dev/null 2>&1; then
+	notify-send "Zapret Cap" "$text" 2>/dev/null
+fi
+exit 1

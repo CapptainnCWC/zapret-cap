@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+case "$1" in
+	remove|purge)
+		rm -f /etc/systemd/system/zapret-cap.service
+		command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+		# блок, который мог записать пункт "Обновить файл hosts"
+		if grep -q '^# BEGIN zapret-cap$' /etc/hosts 2>/dev/null; then
+			sed -i '/^# BEGIN zapret-cap$/,/^# END zapret-cap$/d' /etc/hosts
+		fi
+		rm -f /opt/zapret-cap/core/nfq2/nfqws2 /opt/zapret-cap/core/nfq2/*.o
+		command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
+		command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+		;;
+esac
+if [ "$1" = purge ]; then
+	rm -rf /opt/zapret-cap /var/lib/zapret-cap
+fi
+exit 0

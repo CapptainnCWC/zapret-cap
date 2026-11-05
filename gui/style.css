@@ -1,0 +1,97 @@
+/* Цвета берутся из темы: приложение выглядит правильно и в светлом, и в тёмном оформлении */
+.hero {
+  border-radius: 22px;
+  padding: 30px 24px 26px;
+  transition: background-color 250ms ease;
+}
+.hero-off {
+  background-color: alpha(currentColor, 0.06);
+}
+.hero-on {
+  background-image: linear-gradient(135deg, #2bb573, #177a50);
+  color: white;
+}
+.hero-title {
+  font-size: 1.75em;
+  font-weight: 800;
+}
+.hero-subtitle {
+  opacity: 0.85;
+}
+
+.power {
+  min-width: 104px;
+  min-height: 104px;
+  border-radius: 999px;
+  padding: 0;
+  transition: all 200ms ease;
+}
+.hero-off .power {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+  box-shadow: 0 8px 22px alpha(@accent_bg_color, 0.35);
+}
+.hero-off .power:hover {
+  background-color: shade(@accent_bg_color, 1.08);
+}
+.hero-on .power {
+  background-color: alpha(white, 0.22);
+  color: white;
+  box-shadow: 0 0 0 9px alpha(white, 0.1);
+}
+.hero-on .power:hover {
+  background-color: alpha(white, 0.3);
+}
+.power:disabled {
+  opacity: 0.6;
+}
+
+.badge {
+  border-radius: 999px;
+  padding: 3px 11px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+.badge-good {
+  background-color: alpha(@success_color, 0.18);
+  color: @success_color;
+}
+.badge-mid {
+  background-color: alpha(@warning_color, 0.2);
+  color: @warning_color;
+}
+.badge-bad {
+  background-color: alpha(@error_color, 0.16);
+  color: @error_color;
+}
+.badge-neutral {
+  background-color: alpha(currentColor, 0.1);
+}
+.badge-running {
+  background-color: @success_color;
+  color: white;
+}
+
+.notice {
+  padding: 8px 14px;
+}
+.notice-warning {
+  background-color: alpha(@warning_color, 0.2);
+}
+.notice-info {
+  background-color: alpha(@accent_bg_color, 0.16);
+}
+.busy-strip {
+  padding: 6px 14px;
+  background-color: alpha(currentColor, 0.06);
+}
+
+.card-padded {
+  padding: 18px;
+}
+.log-view {
+  font-family: monospace;
+  font-size: 0.85em;
+  padding: 10px;
+  border-radius: 10px;
+}

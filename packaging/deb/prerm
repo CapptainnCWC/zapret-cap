@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+DST=/opt/zapret-cap
+case "$1" in
+	remove|upgrade|deconfigure)
+		if command -v systemctl >/dev/null 2>&1; then
+			if [ "$1" = remove ]; then
+				systemctl disable --now zapret-cap.service >/dev/null 2>&1 || true
+			else
+				systemctl stop zapret-cap.service >/dev/null 2>&1 || true
+			fi
+		fi
+		[ -x "$DST/zapret" ] && "$DST/zapret" daemon-stop >/dev/null 2>&1 || true
+		;;
+esac
+exit 0

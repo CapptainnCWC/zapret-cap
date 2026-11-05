@@ -1,0 +1,21 @@
+# результат сборки
+core/nfq2/nfqws2
+core/nfq2/*.o
+core/ip2net/ip2net
+core/mdig/mdig
+core/binaries/my/
+
+# готовые пакеты
+/dist/
+
+# состояние и результаты конкретного компьютера
+/state/
+/utils/test results/
+/utils/game_filter.enabled
+/lists/ipset-exclude-user.txt
+/lists/list-general-user.txt
+/lists/list-exclude-user.txt
+/lists/ipset-all.test-backup.txt
+
+.vscode/
+__pycache__/

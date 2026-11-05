@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.zapretcap.ZapretCap</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Zapret Cap</name>
+  <summary>Обход блокировок YouTube, Discord и других сайтов</summary>
+  <description>
+    <p>Возвращает доступ к сайтам и сервисам, которые замедляет или блокирует провайдер. Работает прямо на компьютере: это не VPN, сторонние серверы не нужны, а IP-адрес не меняется.</p>
+    <p>Приложение само находит рабочую стратегию, позволяет добавлять свои сайты и настраивать фильтр игр, IPSet и фейки.</p>
+  </description>
+  <launchable type="desktop-id">org.zapretcap.ZapretCap.desktop</launchable>
+  <url type="homepage">https://github.com/Flowseal/zapret-discord-youtube</url>
+  <developer id="org.zapretcap">
+    <name>Zapret Cap</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Network</category>
+  </categories>
+  <releases>
+    <release version="1.1.0" date="2026-11-06">
+      <description>
+        <p>Окно приложения вместо меню в терминале и установка с ярлыком в системе.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# zapret cap : управление обходом блокировок. Без аргументов открывает меню.
+set -u
+umask 022
+
+Z_HOME="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+for module in common engine service tests switch lists diag menu api; do
+	# shellcheck source=/dev/null
+	. "$Z_HOME/lib/$module.sh"
+done
+
+usage()
+{
+	cat <<EOF
+zapret cap $(cap_version) - обход блокировок на основе zapret2
+
+  zapret                       открыть меню в терминале
+  zapret gui                   открыть окно приложения
+  zapret status                что сейчас работает
+
+Стратегии:
+  zapret list                  список стратегий с результатами последнего теста
+  zapret use [ИМЯ|НОМЕР]       включить стратегию и добавить её в автозапуск
+  zapret next                  перейти на следующую стратегию
+  zapret auto                  проверить текущую и подобрать рабочую, если она сломалась
+  zapret start                 включить последнюю выбранную стратегию
+  zapret stop                  выключить обход и убрать его из автозапуска
+  zapret autostart on|off      автозапуск при включении компьютера
+
+Тесты:
+  zapret test                  выбрать тест в диалоге
+  zapret test standard [all|1,3,5-7] [--apply-best]    сайты: HTTP, TLS 1.2, TLS 1.3, ping
+  zapret test dpi [all|1,3,5-7] [--apply-best]         замирание TCP на 16-20 КБ
+
+Домены (lists/list-general.txt):
+  zapret add ДОМЕН [ДОМЕН...]  добавить. Можно вставить ссылку целиком
+  zapret remove ДОМЕН [...]    убрать
+  zapret domains               показать список
+
+Настройки:
+  zapret game [off|all|tcp|udp]    фильтр игр
+  zapret game-ports tcp|udp|all ДИАПАЗОН
+  zapret ipset [next|loaded|none|any|update]
+  zapret fakes                     заменить активные фейки Discord и игр
+  zapret fakes list                показать активные фейки и файлы
+  zapret fakes set discord|game ИМЯ
+  zapret update-check [on|off]     проверка обновлений
+  zapret hosts [--check|--yes]     сверить файл hosts
+  zapret diag                      диагностика проблем
+  zapret stop-foreign              остановить другие средства обхода
+  zapret clear-discord             очистить кэш Discord
+  zapret uninstall [--yes]         удалить приложение
+EOF
+}
+
+command="${1:-menu}"
+[ $# -gt 0 ] && shift
+
+case "$command" in
+	help|-h|--help) usage; exit 0 ;;
+	version|--version) cap_version; exit 0 ;;
+	gui) exec "$Z_HOME/zapret-gui" "$@" ;;
+	list)
+		if [ "${1:-}" = --tsv ]; then api_strategies; else list_strategies; fi
+		exit 0
+		;;
+	domains) domain_list; exit 0 ;;
+	state) api_state; exit 0 ;;
+	fakes) [ "${1:-}" = list ] && { api_fakes; exit 0; } ;;
+	update-check) [ $# -eq 0 ] && { update_check_now; exit 0; } ;;
+	hosts) [ "${1:-}" = --check ] && { hosts_check; exit $?; } ;;
+esac
+
+# всё остальное меняет сеть или файлы в /opt
+need_root "$command" "$@"
+prepare_dirs
+load_user_lists
+
+case "$command" in
+	menu) menu_main ;;
+	status) show_status ;;
+	use) switch_use "$@" ;;
+	next) switch_next ;;
+	auto) switch_auto "$@" ;;
+	start) switch_start ;;
+	stop) service_remove ;;
+	autostart) autostart_set "${1:-}" ;;
+	test) tests_cli "$@" ;;
+	test-cancel) tests_cancel ;;
+	add) domain_add "$@" ;;
+	remove) domain_remove "$@" ;;
+	game) game_set "${1:-}" ;;
+	game-ports) game_ports_set "${1:-}" "${2:-}" ;;
+	ipset) ipset_cli "${1:-next}" ;;
+	fakes)
+		if [ "${1:-}" = set ]; then fakes_set "${2:-}" "${3:-}"; else fakes_menu; fi
+		;;
+	update-check) update_check_cli "${1:-}" ;;
+	hosts) hosts_update "$@" ;;
+	diag) diagnostics ;;
+	stop-foreign) ASSUME_YES=1; diag_conflicts ;;
+	clear-discord) ASSUME_YES=1; diag_discord ;;
+	uninstall) exec "$Z_HOME/uninstall.sh" "$@" ;;
+	# вызываются из systemd
+	daemon-start) engine_start_current ;;
+	daemon-stop) engine_stop ;;
+	*) err "Неизвестная команда: $command"; usage; exit 1 ;;
+esac

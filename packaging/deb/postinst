@@ -1,0 +1,31 @@
+#!/bin/sh
+# Движок собирается здесь: так один пакет подходит для любой версии Debian, Ubuntu и Mint и для любого процессора
+set -e
+DST=/opt/zapret-cap
+KEEP=/var/lib/zapret-cap/keep
+case "$1" in
+	configure)
+		if [ -d "$KEEP" ]; then
+			[ -d "$KEEP/lists" ] && cp -a "$KEEP/lists/." "$DST/lists/"
+			[ -d "$KEEP/utils" ] && cp -a "$KEEP/utils/." "$DST/utils/"
+			[ -d "$KEEP/state" ] && cp -a "$KEEP/state" "$DST/"
+			cp -a "$KEEP/fake/." "$DST/fake/" 2>/dev/null || true
+			# свои стратегии пользователя: присланные с обновлением файлы не перезаписываем
+			[ -d "$KEEP/strategies" ] && cp -an "$KEEP/strategies/." "$DST/strategies/" 2>/dev/null || true
+			rm -rf /var/lib/zapret-cap/keep
+		fi
+		rmdir /var/lib/zapret-cap 2>/dev/null || true
+		echo "Сборка движка, это займёт около минуты..."
+		make -C "$DST/core/nfq2" clean >/dev/null 2>&1 || true
+		make -C "$DST/core/nfq2" -j"$(nproc 2>/dev/null || echo 2)" >/dev/null
+		chown -R root:root "$DST"
+		chmod -R a+rX "$DST"
+		command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
+		command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+		# при обновлении вернуть обход, который работал до него
+		if [ "$(cat "$DST/state/enabled" 2>/dev/null)" = 1 ]; then
+			"$DST/zapret" start || true
+		fi
+		;;
+esac
+exit 0

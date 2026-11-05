@@ -1,0 +1,20 @@
+#!/bin/sh
+# Перед обновлением (или поверх установки через install.sh) сохраняет то, что менял человек
+set -e
+DST=/opt/zapret-cap
+KEEP=/var/lib/zapret-cap/keep
+case "$1" in
+	install|upgrade)
+		if [ -d "$DST" ]; then
+			command -v systemctl >/dev/null 2>&1 && systemctl stop zapret-cap.service >/dev/null 2>&1 || true
+			[ -x "$DST/zapret" ] && "$DST/zapret" daemon-stop >/dev/null 2>&1 || true
+			rm -rf /var/lib/zapret-cap/keep
+			mkdir -p "$KEEP/fake"
+			for item in lists utils state strategies; do
+				[ -d "$DST/$item" ] && cp -a "$DST/$item" "$KEEP/"
+			done
+			cp -a "$DST"/fake/ACTIVE_* "$KEEP/fake/" 2>/dev/null || true
+		fi
+		;;
+esac
+exit 0

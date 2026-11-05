@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Zapret Cap
+GenericName=Обход блокировок
+Comment=Возвращает доступ к YouTube, Discord и другим сайтам: выбор стратегии и настройки
+Exec=/opt/zapret-cap/zapret-gui
+Icon=org.zapretcap.ZapretCap
+Terminal=false
+Categories=Network;
+Keywords=zapret;dpi;youtube;discord;блокировки;обход;
+StartupNotify=true
+StartupWMClass=org.zapretcap.ZapretCap
