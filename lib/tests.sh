@@ -20,6 +20,82 @@ tests_defaults()
 	read -r -a CURL_EXTRA <<< "${ZAPRET_CURL_OPTS:-}"
 }
 
+# --- сохранённые итоги и общая оценка
+
+# имя, ok, ошибки, не поддерживается, ping ok, ping нет
+RESULTS_STD="$STATE_DIR/last-test.tsv"
+# имя, ok, ошибки, не поддерживается, замирания
+RESULTS_DPI="$STATE_DIR/last-dpi.tsv"
+
+# Новые строки заменяют прежние итоги тех же стратегий, итоги остальных сохраняются
+results_merge()
+{
+	local file="$1" new="$2" tmp
+	[ -f "$file" ] || : > "$file"
+	tmp="$(mktemp "$file.XXXXXX")"
+	awk -F'\t' 'NR == FNR { fresh[$1] = 1; next } !($1 in fresh)' "$new" "$file" > "$tmp"
+	cat "$new" >> "$tmp"
+	chmod 644 "$tmp"
+	mv -f "$tmp" "$file"
+}
+
+# поля сохранённого итога стратегии через табуляцию, без имени. Пусто, если итога нет
+results_get()
+{
+	awk -F'\t' -v n="$2" '$1 == n { sub(/^[^\t]*\t/, ""); print; exit }' "$1" 2>/dev/null
+}
+
+# Общая оценка 0-100. Открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ:
+# стратегия, которая не открывает сайты, бесполезна, а замирающая мешает пользоваться ими.
+# Тест, который не запускался, даёт ноль: такая стратегия проверена не до конца
+score_calc()
+{
+	# ok ошибки dpi_ok dpi_ошибки dpi_замирания
+	awk -v ok="$1" -v err="$2" -v dok="$3" -v dfail="$4" -v dbl="$5" 'BEGIN {
+		site = (ok + err > 0) ? ok / (ok + err) : 0
+		fr = (dok != "" && dok + dfail + dbl > 0) ? dok / (dok + dfail + dbl) : 0
+		printf "%d\n", (2 * site + fr) / 3 * 100 + 0.5
+	}'
+}
+
+# Все стратегии с итогами обоих тестов и общей оценкой: имя, 5 полей теста сайтов, 4 поля DPI-теста, оценка
+strategy_table()
+{
+	strategy_names | awk -F'\t' -v OFS='\t' -v std="$RESULTS_STD" -v dpi="$RESULTS_DPI" '
+		BEGIN {
+			while ((getline line < std) > 0) {
+				split(line, f, "\t")
+				s[f[1]] = f[2] "\t" f[3] "\t" f[4] "\t" f[5] "\t" f[6]
+				sok[f[1]] = f[2]; serr[f[1]] = f[3]
+			}
+			while ((getline line < dpi) > 0) {
+				split(line, f, "\t")
+				d[f[1]] = f[2] "\t" f[3] "\t" f[4] "\t" f[5]
+				dok[f[1]] = f[2]; dfail[f[1]] = f[3]; dbl[f[1]] = f[5]
+			}
+		}
+		{
+			name = $0
+			score = ""
+			if ((name in s) || (name in d)) {
+				site = (name in s && sok[name] + serr[name] > 0) ? sok[name] / (sok[name] + serr[name]) : 0
+				fr = (name in d && dok[name] + dfail[name] + dbl[name] > 0) ? dok[name] / (dok[name] + dfail[name] + dbl[name]) : 0
+				score = int((2 * site + fr) / 3 * 100 + 0.5)
+			}
+			print name, ((name in s) ? s[name] : "\t\t\t\t"), ((name in d) ? d[name] : "\t\t\t"), score
+		}'
+}
+
+# Итоги для человека: имя и текст через табуляцию. read здесь не годится: идущие подряд табуляции он склеивает
+strategy_summaries()
+{
+	strategy_table | awk -F'\t' -v OFS='\t' '$11 != "" {
+		text = ($2 != "") ? "сайты " $2 " из " ($2 + $3) : "сайты не проверены"
+		text = text (($7 != "") ? ", без замирания " $7 " из " ($7 + $8 + $10) : ", замирание не проверено")
+		print $1, "оценка " $11 ": " text
+	}'
+}
+
 # --- ipset на время DPI-теста
 
 ipset_test_any()
@@ -376,10 +452,11 @@ tests_run()
 	# прошлый запуск мог быть убит вместе с окном терминала
 	ipset_test_restore
 
-	if [ "$type" = standard ]; then
+	if [ "$type" != dpi ]; then
 		targets_load
 		echo "Целей загружено: ${#TARGET_NAMES[@]}"
-	else
+	fi
+	if [ "$type" != standard ]; then
 		dpi_targets_load || return 1
 	fi
 
@@ -405,8 +482,9 @@ tests_run()
 	result_file="$RESULTS_DIR/test_results_$date_str.txt"
 	REPORT_BODY="$RUN_DIR/report.$$"
 	: > "$REPORT_BODY"
-	local analytics="$RUN_DIR/analytics.$$"
+	local analytics="$RUN_DIR/analytics.$$" analytics_dpi="$RUN_DIR/analytics-dpi.$$" score
 	: > "$analytics"
+	: > "$analytics_dpi"
 
 	for i in "${SELECTED[@]}"; do
 		name="${names[$i]}"
@@ -422,23 +500,53 @@ tests_run()
 			printf '  не запустилась\n\n' >> "$REPORT_BODY"
 			continue
 		fi
-		if [ "$type" = standard ]; then
-			run_standard
-			printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" >> "$analytics"
-			machine_say result "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL"
-		else
-			run_dpi
-			printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics"
-			machine_say result "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
-		fi
+		case "$type" in
+			standard)
+				run_standard
+				printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" >> "$analytics"
+				machine_say result "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL"
+				local saved_dpi=()
+				IFS=$'\t' read -r -a saved_dpi <<< "$(results_get "$RESULTS_DPI" "$name")"
+				score="$(score_calc "$STD_OK" "$STD_ERR" "${saved_dpi[0]:-}" "${saved_dpi[1]:-}" "${saved_dpi[3]:-}")"
+				;;
+			dpi)
+				run_dpi
+				printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics_dpi"
+				machine_say result "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
+				local saved_std=()
+				IFS=$'\t' read -r -a saved_std <<< "$(results_get "$RESULTS_STD" "$name")"
+				score="$(score_calc "${saved_std[0]:-0}" "${saved_std[1]:-0}" "$DPI_OK" "$DPI_FAIL" "$DPI_BLOCKED")"
+				;;
+			full)
+				echo
+				info "  Открытие сайтов:"
+				run_standard
+				# замирание проверяется на всех адресах, как в DPI-тесте, а сайты - в обычном режиме IPSet
+				if [ "$(ipset_status)" != any ]; then
+					ipset_test_any
+					lists_notify
+				fi
+				echo
+				info "  Замирание на 16-20 КБ:"
+				run_dpi
+				ipset_test_restore
+				lists_notify
+				printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" >> "$analytics"
+				printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics_dpi"
+				machine_say result "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" \
+					"$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
+				score="$(score_calc "$STD_OK" "$STD_ERR" "$DPI_OK" "$DPI_FAIL" "$DPI_BLOCKED")"
+				;;
+		esac
+		machine_say score "$name" "$score"
 		printf '\n' >> "$REPORT_BODY"
 		engine_stop
 	done
 
 	echo
 	ok "Все тесты завершены."
-	tests_report "$type" "$analytics" "$result_file"
-	rm -f "$REPORT_BODY" "$analytics"
+	tests_report "$type" "$analytics" "$analytics_dpi" "$result_file"
+	rm -f "$REPORT_BODY" "$analytics" "$analytics_dpi"
 	REPORT_BODY=""
 
 	TESTS_ACTIVE=0
@@ -460,33 +568,55 @@ tests_run()
 
 tests_report()
 {
-	local type="$1" analytics="$2" result_file="$3" width=0 name a b c d e line best="" max_score=0 max_ping=-1 summary
+	local type="$1" analytics="$2" analytics_dpi="$3" result_file="$4" width=0 name a b c d e line best="" summary
+	local max_score=-1 max_ok=-1 max_ping=-1 score
 	summary="$RUN_DIR/summary.$$"
 	: > "$summary"
 	while IFS=$'\t' read -r name _; do
 		[ ${#name} -gt "$width" ] && width=${#name}
-	done < "$analytics"
+	done < <(cat "$analytics" "$analytics_dpi")
 
 	echo
 	info "=== ИТОГИ ==="
-	while IFS=$'\t' read -r name a b c d e; do
-		if [ "$type" = standard ]; then
-			line="$(printf '%-*s : HTTP OK: %3d, ERR: %3d, UNSUP: %3d, Ping OK: %3d, Fail: %3d' "$width" "$name" "$a" "$b" "$c" "$d" "$e")"
-			# как в оригинале: сначала число успешных проверок, при равенстве - пинг
-			if [ "$a" -gt "$max_score" ]; then
-				max_score=$a max_ping=$d best=$name
-			elif [ "$a" -eq "$max_score" ] && [ "$d" -gt "$max_ping" ]; then
-				max_ping=$d best=$name
-			fi
-		else
-			line="$(printf '%-*s : OK: %3d, FAIL: %3d, UNSUP: %3d, BLOCKED: %3d' "$width" "$name" "$a" "$b" "$c" "$d")"
-			if [ "$a" -gt "$max_score" ] || { [ "$a" -eq "$max_score" ] && [ -z "$best" ]; }; then
-				max_score=$a best=$name
-			fi
-		fi
-		warn "$line"
-		printf '%s\n' "$line" >> "$summary"
-	done < "$analytics"
+	case "$type" in
+		standard)
+			while IFS=$'\t' read -r name a b c d e; do
+				line="$(printf '%-*s : HTTP OK: %3d, ERR: %3d, UNSUP: %3d, Ping OK: %3d, Fail: %3d' "$width" "$name" "$a" "$b" "$c" "$d" "$e")"
+				# как в оригинале: сначала число успешных проверок, при равенстве - пинг
+				if [ "$a" -gt "$max_ok" ] || { [ "$a" -eq "$max_ok" ] && [ "$d" -gt "$max_ping" ]; }; then
+					max_ok=$a max_ping=$d best=$name
+				fi
+				warn "$line"
+				printf '%s\n' "$line" >> "$summary"
+			done < "$analytics"
+			;;
+		dpi)
+			while IFS=$'\t' read -r name a b c d; do
+				line="$(printf '%-*s : OK: %3d, FAIL: %3d, UNSUP: %3d, BLOCKED: %3d' "$width" "$name" "$a" "$b" "$c" "$d")"
+				if [ "$a" -gt "$max_ok" ]; then
+					max_ok=$a best=$name
+				fi
+				warn "$line"
+				printf '%s\n' "$line" >> "$summary"
+			done < "$analytics_dpi"
+			;;
+		full)
+			local da db dc dd
+			while IFS=$'\t' read -r name a b c d e && IFS=$'\t' read -r _ da db dc dd <&3; do
+				score="$(score_calc "$a" "$b" "$da" "$db" "$dd")"
+				line="$(printf '%-*s : оценка %3d | сайты OK: %3d, ERR: %3d, UNSUP: %3d, Ping OK: %3d | без замирания: %3d, FAIL: %3d, BLOCKED: %3d' \
+					"$width" "$name" "$score" "$a" "$b" "$c" "$d" "$da" "$db" "$dd")"
+				# оценка, при равенстве - больше открытых сайтов, затем пинг
+				if [ "$score" -gt "$max_score" ] || { [ "$score" -eq "$max_score" ] && { [ "$a" -gt "$max_ok" ] ||
+					{ [ "$a" -eq "$max_ok" ] && [ "$d" -gt "$max_ping" ]; }; }; }; then
+					max_score=$score max_ok=$a max_ping=$d best=$name
+				fi
+				warn "$line"
+				printf '%s\n' "$line" >> "$summary"
+			done < "$analytics" 3< "$analytics_dpi"
+			echo "Оценка: открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ."
+			;;
+	esac
 
 	BEST_CONFIG="$best"
 	echo
@@ -506,10 +636,10 @@ tests_report()
 	ok "Результаты сохранены: $result_file"
 	rm -f "$summary"
 
-	# порядок для "zapret next" и "zapret auto"
-	if [ "$type" = standard ] && [ -s "$analytics" ]; then
-		sort -t $'\t' -k2,2nr -k5,5nr "$analytics" > "$STATE_DIR/last-test.tsv"
-	fi
+	# итоги для списка стратегий, "zapret next" и "zapret auto". Итоги непроверенных стратегий сохраняются
+	[ -s "$analytics" ] && results_merge "$RESULTS_STD" "$analytics"
+	[ -s "$analytics_dpi" ] && results_merge "$RESULTS_DPI" "$analytics_dpi"
+	return 0
 }
 
 tests_cli()
@@ -532,8 +662,8 @@ tests_cli()
 		return
 	fi
 	case "$type" in
-		standard|dpi) ;;
-		*) err "Тип теста: standard или dpi."; return 1 ;;
+		standard|dpi|full) ;;
+		*) err "Тип теста: full, standard или dpi."; return 1 ;;
 	esac
 	tests_run "$type" "${selection:-all}" "$apply"
 }
@@ -544,13 +674,15 @@ tests_dialog()
 	while :; do
 		echo
 		info "Какой тест запустить?"
-		echo "  1. Обычный (сайты: HTTP, TLS 1.2, TLS 1.3, ping) - подходит почти всегда"
-		echo "  2. DPI (замирание TCP на 16-20 КБ)"
+		echo "  1. Полный: сайты и замирание на 16-20 КБ, общая оценка - рекомендуется"
+		echo "  2. Только сайты: HTTP, TLS 1.2, TLS 1.3, ping"
+		echo "  3. Только DPI: замирание TCP на 16-20 КБ"
 		echo "  0. Назад"
 		read -r -p "Выберите пункт: " choice || return 0
 		case "$choice" in
-			1) type=standard; break ;;
-			2) type=dpi; break ;;
+			1) type=full; break ;;
+			2) type=standard; break ;;
+			3) type=dpi; break ;;
 			0) return 0 ;;
 			*) warn "Нет такого пункта." ;;
 		esac

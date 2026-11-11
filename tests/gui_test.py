@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Сценарий для окна приложения: нажимает те же кнопки, что и человек, и сверяет результат с утилитой.
 Запускается через tests/gui-test.sh: снаружи окружения sandbox-test.sh он изменил бы настоящую систему."""
+import glob
 import os
 import sys
 import traceback
@@ -9,6 +10,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if not os.environ.get("ZAPRET_HOME"):
     sys.exit("Запускайте через tests/gui-test.sh")
 sys.path.insert(0, os.path.join(REPO, "gui"))
+
+# окно не должно подменять себя новой версией посреди проверки, даже если обновление вдруг найдётся
+os.environ["ZAPRET_GUI_NO_EXEC"] = "1"
 
 import main as app  # noqa: E402
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
@@ -93,7 +97,8 @@ def scenario():
 
     print("Первый запуск", flush=True)
     check("обход выключен", not window.state.running)
-    check("в списке 22 стратегии", len(window.strategies.rows) == 22)
+    expected = len(glob.glob(os.path.join(HOME_DIR, "strategies", "*.conf")))
+    check(f"в списке все стратегии: {expected}", expected > 0 and len(window.strategies.rows) == expected)
     yield from shot(window, "01-home-off-dark")
     window.home.power.emit("clicked")
     yield Until(lambda: dialog_open(window), 5)
@@ -124,9 +129,10 @@ def scenario():
     check("кнопка выключает обход", not state(window).running)
     check("главная показывает выключенное состояние", window.home.hero.has_css_class("hero-off"))
 
-    print("Проверка выбранных стратегий", flush=True)
+    print("Проверка выбранных стратегий: сайты и замирание", flush=True)
     window.show_page("strategies")
     page = window.strategies
+    check("по умолчанию проверяются и сайты, и замирание", page.kind.get_selected() == 0)
     page.scope.set_selected(1)
     chosen = [name for name in page.names if name in ("general", "general (ALT5)")]
     check("обе стратегии есть в списке", len(chosen) == 2)
@@ -139,11 +145,22 @@ def scenario():
     yield from shot(window, "05-test-running")
     yield idle(window, 180)
     check("есть результаты по двум стратегиям", len(page.run_results) == 2)
+    # 5 чисел проверки сайтов и 4 числа проверки замирания
+    check("у каждой стратегии оба теста", all(len(values) == 9 for values in page.run_results.values()))
+    check("оценка пришла для каждой", all(name in page.run_scores for name in chosen))
     check("лучшая стратегия определена", bool(page.best))
     check("карточка результата показана", page.best_group.get_visible())
+    check("в карточке оценка и обе части", page.best_row.get_subtitle().startswith("Оценка")
+          and "сайты" in page.best_row.get_subtitle() and "замирани" in page.best_row.get_subtitle())
     check("ошибочного диалога нет", not dialog_open(window))
-    yield Until(lambda: any(item.tested for item in page.strategies), 10)
+    yield Until(lambda: all(page.by_name.get(name) and page.by_name[name].sites_tested and page.by_name[name].dpi_tested
+                            for name in chosen), 10, "сохранённые результаты обоих тестов")
     yield 0.5
+    check("в строке видны обе части", all("без замирания" in page.rows[name].get_subtitle() for name in chosen))
+    scored = [name for name in page.rows if page.by_name[name].score is not None]
+    check("проверенные стратегии стоят первыми", list(page.rows)[:len(scored)] == scored)
+    ranks = [page.by_name[name].score for name in scored]
+    check("и отсортированы по оценке", ranks == sorted(ranks, reverse=True))
     yield from shot(window, "06-test-result")
     best = page.best
     page.best_button.emit("clicked")
@@ -165,8 +182,8 @@ def scenario():
     check("файл с номером процесса теста убран", not os.path.exists(os.path.join(os.environ["ZAPRET_RUN"], "test.pid")))
     check("карточка прогресса скрыта", not page.running_card.get_visible())
 
-    print("DPI-тест", flush=True)
-    page.kind.set_selected(1)
+    print("Только замирание", flush=True)
+    page.kind.set_selected(2)
     page.scope.set_selected(1)
     for name, row in page.rows.items():
         row.pick.set_active(name == chosen[0])
@@ -283,6 +300,19 @@ def scenario():
     settings.shortcut.set_active(False)
     yield 0.3
     check("ярлык убирается", not os.path.exists(window.shortcut_path()))
+
+    print("Обновление приложения без интернета", flush=True)
+    check("баннера о новой версии нет", not window.notice_app.get_visible())
+    window.last_toast = None
+    settings.app_update_button.emit("clicked")
+    yield 0.2
+    yield idle(window, 90)
+    told = bool(window.last_toast) or dialog_open(window)
+    check("кнопка обновления честно сообщает, что не вышло", told)
+    check("окно не перезапускалось и работает", not window.restarting and window.job is None)
+    if dialog_open(window):
+        answer(window, "ok")
+    yield 0.3
 
     settings.on_check_updates()
     yield 0.2

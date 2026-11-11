@@ -81,6 +81,8 @@ engine_base_args()
 		"--fwmark=$FWMARK"
 		"--lua-init=@$Z_HOME/core/lua/zapret-lib.lua"
 		"--lua-init=@$Z_HOME/core/lua/zapret-antidpi.lua"
+		# circular и другие оркестраторы: на них стратегия general (BYEDPI AUTO)
+		"--lua-init=@$Z_HOME/core/lua/zapret-auto.lua"
 		"--lua-init=@$Z_HOME/lua/zapret-cap.lua"
 	)
 	if [ -n "${ZAPRET_NFQWS_EXTRA:-}" ]; then

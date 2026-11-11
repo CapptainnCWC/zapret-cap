@@ -219,6 +219,14 @@ class HomePage:
         self.win.run_job(["auto", "--machine"], "Подбираю рабочую стратегию…", on_line=on_line, on_done=on_done, testing=True)
 
 
+# вид проверки: значение для утилиты, подпись в списке и пояснение под ним
+TEST_KINDS = [
+    ("full", "Сайты и замирание", "Рекомендуется: открытие сайтов и замирание соединения на 16-20 КБ"),
+    ("standard", "Только сайты", "Быстрее, но не покажет замирание на 16-20 КБ"),
+    ("dpi", "Только замирание", "Замирание соединения на 16-20 КБ без проверки сайтов"),
+]
+
+
 class StrategiesPage:
     def __init__(self, win):
         self.win = win
@@ -226,19 +234,20 @@ class StrategiesPage:
         self.rows = {}
         self.names = []
         self.strategies = []
+        self.by_name = {}
         self.best = ""
         self.run_results = {}
-        self.run_kind = "standard"
+        self.run_scores = {}
+        self.run_kind = "full"
 
         check = Adw.PreferencesGroup(
             title="Проверка стратегий",
-            description="Приложение по очереди включит стратегии и проверит сайты. На это время обход отключается, а потом возвращается.",
+            description="Приложение по очереди включит стратегии и проверит, открываются ли сайты и не замирает ли соединение "
+            "после первых 16-20 КБ. На это время обход отключается, а потом возвращается.",
         )
-        self.kind = Adw.ComboRow(
-            title="Что проверять",
-            subtitle="Обычно достаточно проверки сайтов",
-            model=Gtk.StringList.new(["Открытие сайтов", "Замирание на 16-20 КБ"]),
-        )
+        self.kind = Adw.ComboRow(title="Что проверять", model=Gtk.StringList.new([label for _, label, _ in TEST_KINDS]))
+        self.kind.set_subtitle(TEST_KINDS[0][2])
+        self.kind.connect("notify::selected", lambda *_: self.kind.set_subtitle(TEST_KINDS[self.kind.get_selected()][2]))
         self.scope = Adw.ComboRow(title="Какие стратегии", model=Gtk.StringList.new(["Все", "Отмеченные"]))
         self.scope.connect("notify::selected", lambda *_: self.apply_scope())
         check.add(self.kind)
@@ -277,7 +286,7 @@ class StrategiesPage:
         best_icon.add_css_class("success")
         self.best_row.add_prefix(best_icon)
         self.best_button = centered_button("Включить", "suggested-action")
-        self.best_button.connect("clicked", lambda _: self.apply(self.best))
+        self.best_button.connect("clicked", lambda _: self.best and self.apply(self.best))
         win.action_widgets.append(self.best_button)
         self.best_row.add_suffix(self.best_button)
         self.best_group.add(self.best_row)
@@ -287,7 +296,9 @@ class StrategiesPage:
         box.append(self.best_group)
 
         self.list_group = Adw.PreferencesGroup(
-            title="Все стратегии", description="Нажмите на стратегию, чтобы включить её. Выбор применяется сразу."
+            title="Все стратегии",
+            description="Сначала лучшие по общей оценке. Открытие сайтов весит в ней вдвое больше, чем отсутствие замирания на 16-20 КБ. "
+            "Нажмите на стратегию, чтобы включить её: выбор применяется сразу.",
         )
         box.append(self.list_group)
 
@@ -297,31 +308,23 @@ class StrategiesPage:
             row.current_icon.set_visible(not state.running and name == state.get("current"))
 
     def set_strategies(self, strategies):
+        """Полный список из zapret list --tsv. names хранит порядок утилиты: по нему считаются номера для теста."""
         self.strategies = strategies
-        self.names = [item.name for item in strategies]
-        known = self.run_results if self.run_results else {}
-        ordered = sorted(strategies, key=lambda item: self.sort_key(item, known))
+        self.names = [item.name for item in sorted(strategies, key=lambda item: item.index)]
+        self.by_name = {item.name: item for item in strategies}
         for row in list(self.rows.values()):
             self.list_group.remove(row)
         previous = {name: row.pick.get_active() for name, row in self.rows.items()}
         self.rows = {}
-        for item in ordered:
+        for item in be.sort_strategies(strategies):
             row = self.make_row(item)
             row.pick.set_active(previous.get(item.name, False))
             self.rows[item.name] = row
             self.list_group.add(row)
         self.apply_scope()
         self.refresh(self.win.state)
-
-    def sort_key(self, item, known):
-        # последний тест задаёт порядок: сначала лучшие
-        if item.name in known:
-            result = known[item.name]
-            # у обычного теста четвёртое поле - удачные ping, у DPI - замирания, которых должно быть меньше
-            return (0, -result[0], result[3] if self.run_kind == "dpi" else -result[3], "")
-        if item.tested:
-            return (1, -item.ok, -(item.ping_ok or 0), "")
-        return (2, 0, 0, "")
+        if self.best_group.get_visible():
+            self.show_best()
 
     def make_row(self, item):
         row = action_row(item.name)
@@ -334,23 +337,29 @@ class StrategiesPage:
         row.current_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
         row.current_icon.set_tooltip_text("Выбрана, но сейчас выключена")
         row.current_icon.set_visible(False)
-        result = self.result_badge(item)
+        row.score_badge = badge("")
+        row.score_badge.add_css_class("badge-score")
+        row.score_badge.set_tooltip_text("Общая оценка: открытие сайтов весит вдвое больше, чем отсутствие замирания")
         row.add_suffix(row.running_pill)
         row.add_suffix(row.current_icon)
-        if result:
-            row.add_suffix(result)
+        row.add_suffix(row.score_badge)
+        self.fill_row(row, item)
         return row
 
-    def result_badge(self, item):
-        if item.name in self.run_results and self.run_kind == "dpi":
-            ok, fail, _unsup, blocked = self.run_results[item.name]
-            text = f"{ok} ok, замирание: {blocked}" if blocked else f"{ok} ok, замираний нет"
-            return badge(text, "badge-good" if not blocked and not fail else "badge-mid")
-        if not item.tested:
-            return None
-        total = item.ok + item.err
-        share = item.ok / total if total else 0
-        return badge(f"{item.ok} из {total}", "badge-good" if share >= 0.9 else ("badge-mid" if share >= 0.5 else "badge-bad"))
+    @staticmethod
+    def score_kind(score):
+        return "badge-good" if score >= 90 else ("badge-mid" if score >= 60 else "badge-bad")
+
+    def fill_row(self, row, item):
+        row.set_subtitle(GLib.markup_escape_text(item.describe()))
+        for kind in ("badge-good", "badge-mid", "badge-bad", "badge-neutral"):
+            row.score_badge.remove_css_class(kind)
+        if item.score is None:
+            row.score_badge.set_visible(False)
+            return
+        row.score_badge.set_label(str(item.score))
+        row.score_badge.add_css_class(self.score_kind(item.score))
+        row.score_badge.set_visible(True)
 
     def apply_scope(self):
         picking = self.scope.get_selected() == 1
@@ -382,8 +391,9 @@ class StrategiesPage:
             self.begin(selection, False)
 
     def begin(self, selection, force):
-        self.run_kind = "dpi" if self.kind.get_selected() == 1 else "standard"
+        self.run_kind = TEST_KINDS[self.kind.get_selected()][0]
         self.run_results = {}
+        self.run_scores = {}
         self.best = ""
         self.best_group.set_visible(False)
         self.running_card.set_visible(True)
@@ -402,28 +412,57 @@ class StrategiesPage:
             number, total = int(fields[1]), int(fields[2])
             self.running_label.set_label(f"Стратегия {number} из {total}: {fields[3]}")
             self.progress.set_fraction((number - 1) / max(total, 1))
-        elif fields[0] == "result":
-            self.run_results[fields[1]] = [int(value) for value in fields[2:]]
-        elif fields[0] == "best":
+        elif fields[0] == "result" and len(fields) >= 3:
+            values = [int(value) for value in fields[2:] if value.strip().lstrip("-").isdigit()]
+            self.run_results[fields[1]] = values
+            # строка сразу показывает новый результат, а порядок меняется после проверки, чтобы список не прыгал
+            item = self.by_name.get(fields[1])
+            if item and item.apply_result(values):
+                self.update_row(item)
+        elif fields[0] == "score" and len(fields) == 3 and fields[2].isdigit():
+            self.run_scores[fields[1]] = int(fields[2])
+            item = self.by_name.get(fields[1])
+            if item:
+                item.score = int(fields[2])
+                self.update_row(item)
+        elif fields[0] == "best" and len(fields) >= 2:
             self.best = fields[1]
+
+    def update_row(self, item):
+        row = self.rows.get(item.name)
+        if row:
+            self.fill_row(row, item)
+
+    def show_best(self):
+        item = self.by_name.get(self.best)
+        if not item:
+            self.best_group.set_visible(False)
+            return
+        self.best_row.set_title(f"Лучшая стратегия: {GLib.markup_escape_text(item.name)}")
+        self.best_row.set_subtitle(GLib.markup_escape_text(item.summary()))
+        self.best_group.set_visible(True)
 
     def on_done(self, rc, lines):
         self.running_card.set_visible(False)
         if rc == be.TEST_CANCELLED:
             self.run_results = {}
+            self.run_scores = {}
             self.win.toast("Проверка остановлена, прежний обход возвращён")
+            self.win.reload_strategies()
             return
         if rc != 0:
             self.win.show_failure("Проверка не удалась", lines)
+            self.win.reload_strategies()
             return
+        if not self.best:
+            # утилита не назвала лучшую: берём по общей оценке
+            best = be.best_strategy(self.strategies)
+            self.best = best.name if best else ""
         if self.best:
-            result = self.run_results.get(self.best, [0, 0])
-            total = result[0] + result[1]
-            self.best_row.set_title(f"Лучшая стратегия: {GLib.markup_escape_text(self.best)}")
-            self.best_row.set_subtitle(f"Успешно {result[0]} проверок из {total}")
-            self.best_group.set_visible(True)
+            self.show_best()
         else:
             self.win.toast("Ни одна стратегия не запустилась")
+        # оценки из утилиты учитывают и сохранённые результаты прошлых проверок, порядок строится по ним
         self.win.reload_strategies()
 
 
@@ -560,7 +599,15 @@ class SettingsPage:
         box.append(fakes)
 
         updates = Adw.PreferencesGroup(title="Обновления")
-        self.update_check = self.switch_row(updates, "Сообщать о новых стратегиях", "Проверка при включении обхода", self.on_update_check)
+        self.app_row = action_row("Приложение Zapret Cap", "")
+        self.app_update_button = centered_button("Обновить", "suggested-action")
+        self.app_update_button.connect("clicked", lambda _: self.on_app_update())
+        win.action_widgets.append(self.app_update_button)
+        self.app_row.add_suffix(self.app_update_button)
+        updates.add(self.app_row)
+        self.update_check = self.switch_row(
+            updates, "Сообщать об обновлениях", "Новые версии приложения и стратегий Flowseal", self.on_update_check
+        )
         check_row = action_row("Новые стратегии", "Узнать, вышла ли новая версия стратегий Flowseal")
         check_button = centered_button("Проверить")
         check_button.connect("clicked", lambda _: self.on_check_updates())
@@ -622,6 +669,8 @@ class SettingsPage:
             self.ipset_mode.set_selected(ipsets.index(ipset))
             self.ipset_mode.set_subtitle(IPSET_MODES[ipsets.index(ipset)][2])
         self.update_check.set_active(state.flag("update_check"))
+        version = state.get("version")
+        self.app_row.set_subtitle(GLib.markup_escape_text(f"Установлена версия {version}" if version else ""))
         self.shortcut.set_sensitive(self.win.desktop_entry() is not None)
         self.shortcut.set_active(os.path.exists(self.win.shortcut_path()))
         self.shortcut.row.set_subtitle(
@@ -681,6 +730,20 @@ class SettingsPage:
     def on_update_check(self, active):
         if not self.updating:
             self.win.run_job(["update-check", "on" if active else "off"], "Меняю настройку…")
+
+    def on_app_update(self):
+        """Одно нажатие: проверить и сразу обновить, если есть что. Пароль спросит сама система."""
+
+        def on_done(rc, lines):
+            info = be.UpgradeInfo(rc, "\n".join(lines))
+            if not info.ok:
+                self.win.toast(f"Не удалось проверить обновление: {info.reason}")
+            elif info.newer:
+                self.win.start_upgrade(info)
+            else:
+                self.win.toast(f"Установлена последняя версия {info.current or self.win.state.get('version')}")
+
+        self.win.run_job(["upgrade", "--check"], "Проверяю, вышла ли новая версия…", root=False, on_done=on_done)
 
     def on_check_updates(self):
         # при новой версии первая строка говорит о ней, а дальше идут подробности для разработчиков
@@ -857,6 +920,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.notice_foreign = self.make_notice("notice-warning", "Подробнее", lambda: self.show_page("diagnostics"))
         self.notice_engine = self.make_notice("notice-warning", None, None)
         self.notice_update = self.make_notice("notice-info", "Открыть", lambda: self.open_uri(RELEASES_URL))
+        self.notice_app = self.make_notice("notice-info", "Обновить", lambda: self.start_upgrade(self.upgrade_info))
+        self.notice_app.button.add_css_class("suggested-action")
+        self.action_widgets.append(self.notice_app.button)
+        self.upgrade_info = None
+        self.upgrade_checked = False
+        self.restarting = False
         root.append(self.notices)
         root.append(self.stack)
 
@@ -884,11 +953,13 @@ class MainWindow(Adw.ApplicationWindow):
         box.add_css_class(css)
         box.label = Gtk.Label(xalign=0, wrap=True, hexpand=True)
         box.append(box.label)
+        box.button = None
         if button_label:
             button = Gtk.Button(label=button_label, valign=Gtk.Align.CENTER)
             button.add_css_class("flat")
             button.connect("clicked", lambda _: callback())
             box.append(button)
+            box.button = button
         box.set_visible(False)
         self.notices.append(box)
         return box
@@ -917,10 +988,48 @@ class MainWindow(Adw.ApplicationWindow):
         built = state.get("engine_built", "1") == "1"
         self.notice_engine.set_visible(not built)
         self.notice_engine.label.set_label("Движок не собран, поэтому обход не запустится. Установите приложение заново: bash install.sh")
+        # о новой версии приложения узнаём один раз за запуск окна и только если человек не выключил проверку
+        if not self.upgrade_checked and state.get("version"):
+            self.upgrade_checked = True
+            if state.flag("update_check"):
+                in_background(self.backend.upgrade_check, self.apply_upgrade_info)
         latest = state.get("update_available")
         self.notice_update.set_visible(bool(latest))
         if latest:
             self.notice_update.label.set_label(f"Вышли новые стратегии Flowseal: {latest}")
+
+    def apply_upgrade_info(self, info):
+        """Итог проверки при запуске. Без сети молчим: человек ничего не просил, а обход работает и так."""
+        self.upgrade_info = info if info is not None and info.ok else None
+        newer = bool(self.upgrade_info and self.upgrade_info.newer)
+        self.notice_app.set_visible(newer)
+        if newer:
+            self.notice_app.label.set_label(f"Доступна новая версия Zapret Cap: {self.upgrade_info.latest}")
+
+    def start_upgrade(self, info=None):
+        version = info.latest if info and info.latest else "новой версии"
+        self.run_job(["upgrade"], f"Обновляю Zapret Cap до {version}…", on_done=self.after_upgrade)
+
+    def after_upgrade(self, rc, lines):
+        if be.upgrade_installed(rc, lines):
+            self.notice_app.set_visible(False)
+            self.toast("Обновление установлено, окно сейчас откроется заново")
+            GLib.timeout_add(1500, self.restart_into_new_version)
+        elif rc == 0:
+            self.notice_app.set_visible(False)
+            self.toast(be.last_message(lines, "Установлена последняя версия"))
+        else:
+            self.show_failure("Не удалось обновить приложение", lines)
+
+    def restart_into_new_version(self):
+        # файлы в папке программы уже заменены, а этот процесс работает со старым кодом
+        path = os.path.join(self.backend.home, "zapret-gui")
+        if os.environ.get("ZAPRET_GUI_NO_EXEC") or not os.access(path, os.X_OK):
+            self.toast("Закройте и снова откройте приложение, чтобы перейти на новую версию")
+            return False
+        self.restarting = True
+        os.execv(path, [path])
+        return False
 
     def reload_all(self):
         self.reload_state()
@@ -1010,6 +1119,7 @@ class MainWindow(Adw.ApplicationWindow):
     # --- диалоги
 
     def toast(self, text):
+        self.last_toast = text
         toast = Adw.Toast(title=GLib.markup_escape_text(text))
         toast.set_timeout(5)
         self.overlay.add_toast(toast)

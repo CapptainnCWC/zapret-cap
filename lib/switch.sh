@@ -32,26 +32,25 @@ strategy_resolve()
 	return 1
 }
 
-strategy_last_result()
-{
-	local line
-	line="$(awk -F'\t' -v n="$1" '$1 == n { print $2 " ok, " $3 " ошибок"; exit }' "$STATE_DIR/last-test.tsv" 2>/dev/null)"
-	printf '%s' "$line"
-}
-
 list_strategies()
 {
 	local names i current running mark result
 	mapfile -t names < <(strategy_names)
 	current="$(state_get current)"
 	running="$(state_get running_strategy)"
+	local -A results=()
+	local line
+	while IFS= read -r line; do
+		results["${line%%$'\t'*}"]="${line#*$'\t'}"
+	done < <(strategy_summaries)
 	for i in "${!names[@]}"; do
 		mark=" "
 		[ "${names[$i]}" = "$current" ] && mark="*"
-		result="$(strategy_last_result "${names[$i]}")"
+		result="${results[${names[$i]}]:-}"
 		printf ' %s %2d. %s%s\n' "$mark" "$((i + 1))" "${names[$i]}" "${result:+   ${C_GRAY}[$result]$C_OFF}"
 	done
 	[ -n "$current" ] && printf '\n * текущая стратегия%s\n' "$([ -n "$running" ] && echo ", работает")"
+	printf ' Оценка: открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ.\n'
 }
 
 switch_use()
@@ -97,16 +96,14 @@ warn_foreign()
 	fi
 }
 
-# порядок перебора: сначала результаты последнего теста от лучшей к худшей, потом остальные
+# порядок перебора: сначала проверенные по общей оценке от лучшей к худшей, потом остальные
 strategy_order()
 {
-	local name
-	{
-		cut -f1 "$STATE_DIR/last-test.tsv" 2>/dev/null
-		strategy_names
-	} | awk '!seen[$0]++' | while IFS= read -r name; do
-		[ -f "$(strategy_file "$name")" ] && printf '%s\n' "$name"
-	done
+	strategy_table | awk -F'\t' -v OFS='\t' '{
+		n++
+		tested = ($11 != "")
+		print (tested ? 0 : 1), (tested ? 1000 - $11 : 0), ($2 == "" ? 100000 : 100000 - $2), ($5 == "" ? 1000 : 1000 - $5), n, $1
+	}' | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | cut -f6
 }
 
 switch_next()

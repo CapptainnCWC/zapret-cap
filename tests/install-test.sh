@@ -57,8 +57,12 @@ done
 # своя копия базы dpkg: настоящую нельзя и не нужно менять, а списки файлов нужны, чтобы dpkg видел чужие папки
 export DPKG_ADMINDIR="$WORK/dpkg"
 mkdir -p "$DPKG_ADMINDIR/info" "$DPKG_ADMINDIR/updates" "$DPKG_ADMINDIR/triggers"
-cp /var/lib/dpkg/status "$DPKG_ADMINDIR/status"
-cp /var/lib/dpkg/info/*.list "$DPKG_ADMINDIR/info/"
+# если приложение уже стоит на этом компьютере из пакета, копия базы не должна об этом знать
+awk -v RS= -v ORS='\n\n' '!/^Package: zapret-cap\n/' /var/lib/dpkg/status > "$DPKG_ADMINDIR/status"
+for list in /var/lib/dpkg/info/*.list; do
+	case "${list##*/}" in zapret-cap.*|zapret-cap:*) continue ;; esac
+	cp "$list" "$DPKG_ADMINDIR/info/"
+done
 
 mkdir -p "$WORK/bin" "$WORK/home/Desktop" "$WORK/run" "$WORK/xdg"
 chmod 700 "$WORK/xdg"

@@ -30,14 +30,11 @@ api_state()
 	return 0
 }
 
-# имя, затем итоги последнего обычного теста: ok, ошибки, не поддерживается, ping ok, ping нет
+# имя, итоги теста сайтов (ok, ошибки, не поддерживается, ping ok, ping нет),
+# итоги DPI-теста (ok, ошибки, не поддерживается, замирания) и общая оценка 0-100. Пустое поле - тест не запускался
 api_strategies()
 {
-	local name row
-	strategy_names | while IFS= read -r name; do
-		row="$(awk -F'\t' -v n="$name" '$1 == n { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6; exit }' "$STATE_DIR/last-test.tsv" 2>/dev/null)"
-		printf '%s\t%s\n' "$name" "${row:-$'\t\t\t\t'}"
-	done
+	strategy_table
 }
 
 api_fakes()
