@@ -50,7 +50,7 @@ list_strategies()
 		printf ' %s %2d. %s%s\n' "$mark" "$((i + 1))" "${names[$i]}" "${result:+   ${C_GRAY}[$result]$C_OFF}"
 	done
 	[ -n "$current" ] && printf '\n * текущая стратегия%s\n' "$([ -n "$running" ] && echo ", работает")"
-	printf ' Оценка: открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ.\n'
+	printf ' Замирание - сколько передач остановилось на 16-20 КБ. Чем меньше, тем лучше.\n'
 }
 
 switch_use()
@@ -96,14 +96,10 @@ warn_foreign()
 	fi
 }
 
-# порядок перебора: сначала проверенные по общей оценке от лучшей к худшей, потом остальные
+# порядок перебора: сначала проверенные от лучшей к худшей (см. strategy_rank), потом остальные
 strategy_order()
 {
-	strategy_table | awk -F'\t' -v OFS='\t' '{
-		n++
-		tested = ($11 != "")
-		print (tested ? 0 : 1), (tested ? 1000 - $11 : 0), ($2 == "" ? 100000 : 100000 - $2), ($5 == "" ? 1000 : 1000 - $5), n, $1
-	}' | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | cut -f6
+	strategy_table | strategy_rank
 }
 
 switch_next()

@@ -147,20 +147,25 @@ def scenario():
     check("есть результаты по двум стратегиям", len(page.run_results) == 2)
     # 5 чисел проверки сайтов и 4 числа проверки замирания
     check("у каждой стратегии оба теста", all(len(values) == 9 for values in page.run_results.values()))
-    check("оценка пришла для каждой", all(name in page.run_scores for name in chosen))
     check("лучшая стратегия определена", bool(page.best))
     check("карточка результата показана", page.best_group.get_visible())
-    check("в карточке оценка и обе части", page.best_row.get_subtitle().startswith("Оценка")
-          and "сайты" in page.best_row.get_subtitle() and "замирани" in page.best_row.get_subtitle())
+    subtitle = page.best_row.get_subtitle()
+    check("в карточке обе части отдельно и без оценки", subtitle.startswith("Сайты ") and "замирание" in subtitle
+          and "Оценка" not in subtitle and "/" in subtitle)
     check("ошибочного диалога нет", not dialog_open(window))
     yield Until(lambda: all(page.by_name.get(name) and page.by_name[name].sites_tested and page.by_name[name].dpi_tested
                             for name in chosen), 10, "сохранённые результаты обоих тестов")
     yield 0.5
-    check("в строке видны обе части", all("без замирания" in page.rows[name].get_subtitle() for name in chosen))
-    scored = [name for name in page.rows if page.by_name[name].score is not None]
-    check("проверенные стратегии стоят первыми", list(page.rows)[:len(scored)] == scored)
-    ranks = [page.by_name[name].score for name in scored]
-    check("и отсортированы по оценке", ranks == sorted(ranks, reverse=True))
+    check("у строк два отдельных результата", all(
+        page.rows[name].sites_badge.get_label().startswith("сайты ") and "/" in page.rows[name].sites_badge.get_label()
+        and page.rows[name].freeze_badge.get_label().startswith("замирание ") and "/" in page.rows[name].freeze_badge.get_label()
+        for name in chosen))
+    check("непроверенные помечены прочерком", all(
+        page.rows[name].sites_badge.get_label() == "сайты —" for name in page.rows if not page.by_name[name].tested))
+    tested = [name for name in page.rows if page.by_name[name].tested]
+    check("проверенные стратегии стоят первыми", list(page.rows)[:len(tested)] == tested)
+    order = [(-(page.by_name[n].sites_share or 0), page.by_name[n].freeze_share or 0) for n in tested]
+    check("сначала больше сайтов, при равенстве меньше замирания", order == sorted(order))
     yield from shot(window, "06-test-result")
     best = page.best
     page.best_button.emit("clicked")
@@ -304,9 +309,11 @@ def scenario():
     print("Обновление приложения без интернета", flush=True)
     check("баннера о новой версии нет", not window.notice_app.get_visible())
     window.last_toast = None
-    settings.app_update_button.emit("clicked")
+    window.show_page("home")
+    window.home.update_button.emit("clicked")
     yield 0.2
-    yield idle(window, 90)
+    # две проверки подряд: стратегии Flowseal, затем само приложение
+    yield Until(lambda: window.job is None and window.last_toast, 120, "проверка обновлений закончилась")
     told = bool(window.last_toast) or dialog_open(window)
     check("кнопка обновления честно сообщает, что не вышло", told)
     check("окно не перезапускалось и работает", not window.restarting and window.job is None)
@@ -314,10 +321,16 @@ def scenario():
         answer(window, "ok")
     yield 0.3
 
-    settings.on_check_updates()
-    yield 0.2
-    yield idle(window, 30)
-    check("проверка обновлений без сети не ломает окно", not dialog_open(window))
+    check("кнопка обновления стоит на главной", window.home.update_button.get_parent() is not None and window.home.version_row.get_title().startswith("Zapret Cap"))
+    window.show_page("settings")
+    window.show_about()
+    yield 0.5
+    about = getattr(window, "last_about", None)
+    check("в окне «О приложении» нет безымянной ссылки", about is not None and not about.get_website())
+    yield from shot(window, "10-about")
+    if about is not None:
+        about.force_close() if hasattr(about, "force_close") else about.close()
+    yield 0.3
     settings.on_hosts()
     yield 0.2
     yield idle(window, 40)

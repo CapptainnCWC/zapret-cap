@@ -67,8 +67,8 @@
 .badge-neutral {
   background-color: alpha(currentColor, 0.1);
 }
-.badge-score {
-  min-width: 2.2em;
+.badge-result {
+  min-width: 4.5em;
 }
 .badge-running {
   background-color: @success_color;

@@ -314,26 +314,27 @@ MONITOR_HOST=dpi.test MONITOR_TIMEOUT=3 "$Z" test dpi 1 </dev/null >"$WORK/dpi.o
 check "DPI-тест отработал" grep -q 'BLOCKED:' "$WORK/dpi.out"
 check "DPI-тест: ipset возвращён" test "$(sha256sum < "$IPSET")" = "$IPSET_ORIG"
 check "DPI-тест: временных файлов нет" test ! -e "$APP/lists/ipset-all.test-backup.txt"
-check "DPI-тест: итог сохранён для общей оценки" test -s "$ZAPRET_STATE/last-dpi.tsv"
+check "DPI-тест: итог сохранён" test -s "$ZAPRET_STATE/last-dpi.tsv"
 
 echo
-echo "=== Полный тест и общая оценка ==="
+echo "=== Полный тест: сайты и замирание ==="
 STD_BEFORE="$(cat "$ZAPRET_STATE/last-test.tsv" 2>/dev/null)"
 MONITOR_HOST=dpi.test MONITOR_TIMEOUT=3 "$Z" test full 1,2 --machine </dev/null >"$WORK/full.out" 2>&1
-check "полный тест отработал" grep -q 'оценка' "$WORK/full.out"
+check "полный тест отработал" grep -q 'замирание' "$WORK/full.out"
 check "полный тест: по два результата на стратегию" test "$(grep -c '^@result' "$WORK/full.out")" = 2
 check "полный тест: в результате оба теста" sh -c "grep '^@result' '$WORK/full.out' | head -n1 | awk -F'\t' 'NF == 11 { ok = 1 } END { exit !ok }'"
-check "полный тест: оценка для каждой стратегии" test "$(grep -c '^@score' "$WORK/full.out")" = 2
+check "полный тест: лучшая стратегия указана" grep -q '^@best' "$WORK/full.out"
 check "полный тест: ipset возвращён" test "$(sha256sum < "$IPSET")" = "$IPSET_ORIG"
 check "полный тест: временных файлов нет" test ! -e "$APP/lists/ipset-all.test-backup.txt"
-check "в списке у проверенных есть оценка" test "$("$Z" list --tsv | awk -F'\t' 'NR <= 2 && $11 != ""' | wc -l)" = 2
-check "в списке 11 полей" sh -c "'$Z' list --tsv | awk -F'\t' 'NF != 11 { bad = 1 } END { exit bad }'"
+check "в списке у проверенных оба итога" test "$("$Z" list --tsv | awk -F'\t' 'NR <= 2 && $2 != "" && $7 != ""' | wc -l)" = 2
+check "в списке 10 полей" sh -c "'$Z' list --tsv | awk -F'\t' 'NF != 10 { bad = 1 } END { exit bad }'"
 check "итоги других стратегий не стёрты" test "$(grep -c . "$ZAPRET_STATE/last-test.tsv")" -ge "$(printf '%s\n' "$STD_BEFORE" | grep -c .)"
 FIRST_IN_ORDER="$(Z_HOME="$APP" bash -c 'for m in common engine service tests switch lists diag menu api upgrade; do . "$Z_HOME/lib/$m.sh"; done; strategy_order | head -n1')"
-MAX_SCORE="$("$Z" list --tsv | awk -F'\t' '$11 != "" && $11 > m { m = $11 } END { print m }')"
-check "next начинает с лучшей по оценке" test "$("$Z" list --tsv | awk -F'\t' -v n="$FIRST_IN_ORDER" '$1 == n { print $11 }')" = "$MAX_SCORE"
+BEST_SITES="$("$Z" list --tsv | awk -F'\t' '$2 != "" { r = $2 / ($2 + $3); if (r > m) m = r } END { print m }')"
+check "next начинает с лучшей по сайтам" test "$("$Z" list --tsv | awk -F'\t' -v n="$FIRST_IN_ORDER" '$1 == n { print $2 / ($2 + $3) }')" = "$BEST_SITES"
 "$Z" list >"$WORK/list.out" 2>&1
-check "список показывает оценку" grep -q 'оценка [0-9]*: сайты' "$WORK/list.out"
+check "список показывает оба итога" grep -q 'сайты [0-9]*/[0-9]*, замирание' "$WORK/list.out"
+check "оценки из 100 баллов больше нет" sh -c "! grep -qi 'оценка' '$WORK/list.out' '$WORK/full.out'"
 
 # --- 6. прерывание
 

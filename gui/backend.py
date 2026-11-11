@@ -44,34 +44,19 @@ SITE_FIELDS = ("ok", "err", "unsup", "ping_ok", "ping_fail")
 DPI_FIELDS = ("dpi_ok", "dpi_fail", "dpi_unsup", "dpi_blocked")
 
 
-def score_of(ok, err, dpi_ok, dpi_fail, dpi_blocked):
-    """Общая оценка 0-100, как в утилите: открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ.
-    Если какой-то тест не запускался, его часть считается нулевой. None - не запускался ни один."""
-    sites_known = ok is not None and err is not None
-    dpi_known = dpi_ok is not None
-    if not sites_known and not dpi_known:
-        return None
-    site = ok / (ok + err) if sites_known and ok + err > 0 else 0
-    dpi_total = (dpi_ok or 0) + (dpi_fail or 0) + (dpi_blocked or 0)
-    dpi = dpi_ok / dpi_total if dpi_known and dpi_total > 0 else 0
-    return int(100 * (2 * site + dpi) / 3 + 0.5)
-
-
 class Strategy:
-    """Строка zapret list --tsv: имя, итоги последних тестов сайтов и замирания, общая оценка.
-    Пустое поле значит, что тест для этой стратегии не запускался."""
+    """Строка zapret list --tsv: имя, итоги последних тестов сайтов и замирания на 16-20 КБ.
+    Пустое поле значит, что тест для этой стратегии не запускался. Одиннадцатое поле, общую оценку утилиты,
+    окно не использует: результаты показываются по отдельности."""
 
     def __init__(self, line, index=0):
-        fields = (line.split("\t") + [""] * 11)[:11]
+        fields = (line.split("\t") + [""] * 10)[:10]
         self.name = fields[0]
         # место в списке утилиты: по нему тест выбирает стратегии, какой бы ни была сортировка в окне
         self.index = index
         numbers = [int(value) if value.strip().isdigit() else None for value in fields[1:]]
-        for key, value in zip(SITE_FIELDS + DPI_FIELDS, numbers[:9]):
+        for key, value in zip(SITE_FIELDS + DPI_FIELDS, numbers):
             setattr(self, key, value)
-        self.score = numbers[9]
-        if self.score is None:
-            self.recalculate()
 
     @property
     def sites_tested(self):
@@ -85,8 +70,27 @@ class Strategy:
     def tested(self):
         return self.sites_tested or self.dpi_tested
 
-    def recalculate(self):
-        self.score = score_of(self.ok, self.err, self.dpi_ok, self.dpi_fail, self.dpi_blocked)
+    @property
+    def sites_total(self):
+        return self.ok + self.err if self.sites_tested else 0
+
+    @property
+    def dpi_total(self):
+        return (self.dpi_ok or 0) + (self.dpi_fail or 0) + (self.dpi_blocked or 0) if self.dpi_tested else 0
+
+    @property
+    def sites_share(self):
+        """Доля открывшихся сайтов, None - не проверялось."""
+        if not self.sites_tested:
+            return None
+        return self.ok / self.sites_total if self.sites_total else 0.0
+
+    @property
+    def freeze_share(self):
+        """Доля проверок с замиранием на 16-20 КБ, None - не проверялось."""
+        if not self.dpi_tested:
+            return None
+        return (self.dpi_blocked or 0) / self.dpi_total if self.dpi_total else 0.0
 
     def apply_result(self, values):
         """Строка @result теста: 5 чисел - сайты, 4 - замирание, 9 - оба теста."""
@@ -100,33 +104,33 @@ class Strategy:
             return False
         for key, value in zip(keys, values):
             setattr(self, key, value)
-        self.recalculate()
         return True
 
-    def describe(self):
-        """Обе части результата для подписи строки. Пусто, если стратегию ещё не проверяли."""
-        if not self.tested:
-            return ""
-        sites = f"сайты: {self.ok} из {self.ok + self.err}" if self.sites_tested else "сайты не проверены"
-        if self.dpi_tested:
-            total = self.dpi_ok + (self.dpi_fail or 0) + (self.dpi_blocked or 0)
-            freeze = f"без замирания: {self.dpi_ok} из {total}"
-        else:
-            freeze = "замирание не проверено"
-        text = f"{sites} · {freeze}"
-        return text[0].upper() + text[1:]
+    def sites_text(self):
+        return f"{self.ok}/{self.sites_total}" if self.sites_tested else "—"
+
+    def freeze_text(self):
+        return f"{self.dpi_blocked or 0}/{self.dpi_total}" if self.dpi_tested else "—"
+
+    def sites_kind(self):
+        """Цвет значка сайтов: от 90% зелёный, от 50% жёлтый, ниже красный, не проверялось - серый."""
+        share = self.sites_share
+        if share is None:
+            return "badge-neutral"
+        return "badge-good" if share >= 0.9 else ("badge-mid" if share >= 0.5 else "badge-bad")
+
+    def freeze_kind(self):
+        """Цвет значка замирания: без замираний зелёный, до трети жёлтый, больше красный, не проверялось - серый."""
+        share = self.freeze_share
+        if share is None:
+            return "badge-neutral"
+        if not self.dpi_blocked:
+            return "badge-good"
+        return "badge-mid" if share <= 1 / 3 else "badge-bad"
 
     def summary(self):
-        """Одна фраза для карточки лучшей стратегии: Оценка 92: сайты 36 из 36, без замирания 16 из 18."""
-        parts = []
-        if self.sites_tested:
-            parts.append(f"сайты {self.ok} из {self.ok + self.err}")
-        if self.dpi_tested:
-            total = self.dpi_ok + (self.dpi_fail or 0) + (self.dpi_blocked or 0)
-            parts.append(f"без замирания {self.dpi_ok} из {total}")
-        if self.score is None:
-            return ", ".join(parts)
-        return f"Оценка {self.score}" + (": " + ", ".join(parts) if parts else "")
+        """Подпись карточки лучшей стратегии: Сайты 36/36 · замирание 0/18."""
+        return f"Сайты {self.sites_text()} · замирание {self.freeze_text()}"
 
 
 def parse_strategies(text):
@@ -134,18 +138,21 @@ def parse_strategies(text):
 
 
 def sort_strategies(items):
-    """Сначала лучшие по оценке, при равенстве больше открытых сайтов и ping. Непроверенные в конце, в порядке утилиты."""
+    """Сначала больше открытых сайтов, при равенстве меньше замираний на 16-20 КБ, затем больше ответов ping.
+    Стратегии без единого результата в конце, в порядке утилиты. Непроверенная часть считается худшей."""
 
     def key(item):
-        if item.score is None:
-            return (1, 0, 0, 0, item.index)
-        return (0, -item.score, -(item.ok or 0), -(item.ping_ok or 0), item.index)
+        if not item.tested:
+            return (1, 0.0, 0.0, 0, item.index)
+        sites = item.sites_share if item.sites_share is not None else -1.0
+        freeze = item.freeze_share if item.freeze_share is not None else 2.0
+        return (0, -sites, freeze, -(item.ping_ok or 0), item.index)
 
     return sorted(items, key=key)
 
 
 def best_strategy(items):
-    ranked = [item for item in sort_strategies(items) if item.score is not None]
+    ranked = [item for item in sort_strategies(items) if item.tested]
     return ranked[0] if ranked else None
 
 

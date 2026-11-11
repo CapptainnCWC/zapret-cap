@@ -20,7 +20,7 @@ tests_defaults()
 	read -r -a CURL_EXTRA <<< "${ZAPRET_CURL_OPTS:-}"
 }
 
-# --- сохранённые итоги и общая оценка
+# --- сохранённые итоги обоих тестов
 
 # имя, ok, ошибки, не поддерживается, ping ok, ping нет
 RESULTS_STD="$STATE_DIR/last-test.tsv"
@@ -39,26 +39,7 @@ results_merge()
 	mv -f "$tmp" "$file"
 }
 
-# поля сохранённого итога стратегии через табуляцию, без имени. Пусто, если итога нет
-results_get()
-{
-	awk -F'\t' -v n="$2" '$1 == n { sub(/^[^\t]*\t/, ""); print; exit }' "$1" 2>/dev/null
-}
-
-# Общая оценка 0-100. Открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ:
-# стратегия, которая не открывает сайты, бесполезна, а замирающая мешает пользоваться ими.
-# Тест, который не запускался, даёт ноль: такая стратегия проверена не до конца
-score_calc()
-{
-	# ok ошибки dpi_ok dpi_ошибки dpi_замирания
-	awk -v ok="$1" -v err="$2" -v dok="$3" -v dfail="$4" -v dbl="$5" 'BEGIN {
-		site = (ok + err > 0) ? ok / (ok + err) : 0
-		fr = (dok != "" && dok + dfail + dbl > 0) ? dok / (dok + dfail + dbl) : 0
-		printf "%d\n", (2 * site + fr) / 3 * 100 + 0.5
-	}'
-}
-
-# Все стратегии с итогами обоих тестов и общей оценкой: имя, 5 полей теста сайтов, 4 поля DPI-теста, оценка
+# Все стратегии с итогами обоих тестов: имя, 5 полей теста сайтов, 4 поля DPI-теста. Пустое поле - тест не запускался
 strategy_table()
 {
 	strategy_names | awk -F'\t' -v OFS='\t' -v std="$RESULTS_STD" -v dpi="$RESULTS_DPI" '
@@ -66,33 +47,37 @@ strategy_table()
 			while ((getline line < std) > 0) {
 				split(line, f, "\t")
 				s[f[1]] = f[2] "\t" f[3] "\t" f[4] "\t" f[5] "\t" f[6]
-				sok[f[1]] = f[2]; serr[f[1]] = f[3]
 			}
 			while ((getline line < dpi) > 0) {
 				split(line, f, "\t")
 				d[f[1]] = f[2] "\t" f[3] "\t" f[4] "\t" f[5]
-				dok[f[1]] = f[2]; dfail[f[1]] = f[3]; dbl[f[1]] = f[5]
 			}
 		}
-		{
-			name = $0
-			score = ""
-			if ((name in s) || (name in d)) {
-				site = (name in s && sok[name] + serr[name] > 0) ? sok[name] / (sok[name] + serr[name]) : 0
-				fr = (name in d && dok[name] + dfail[name] + dbl[name] > 0) ? dok[name] / (dok[name] + dfail[name] + dbl[name]) : 0
-				score = int((2 * site + fr) / 3 * 100 + 0.5)
-			}
-			print name, ((name in s) ? s[name] : "\t\t\t\t"), ((name in d) ? d[name] : "\t\t\t"), score
-		}'
+		{ print $0, (($0 in s) ? s[$0] : "\t\t\t\t"), (($0 in d) ? d[$0] : "\t\t\t") }'
+}
+
+# Порядок от лучшей к худшей: сначала доля открытых сайтов, при равенстве - меньшая доля замираний,
+# затем больше ответов на ping. Открытие сайтов главное: стратегия, которая их не открывает, бесполезна.
+# Читает строки strategy_table, печатает имена. Стратегии без итогов идут последними в обычном порядке
+strategy_rank()
+{
+	awk -F'\t' -v OFS='\t' '{
+		n++
+		tested = ($2 != "" || $7 != "")
+		site = ($2 != "" && $2 + $3 > 0) ? int($2 * 1000 / ($2 + $3)) : -1
+		freeze = ($7 != "" && $7 + $8 + $10 > 0) ? int($10 * 1000 / ($7 + $8 + $10)) : 1001
+		ping = ($5 != "") ? $5 : -1
+		print (tested ? 0 : 1), 1000 - site, freeze, 1000 - ping, n, $1
+	}' | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | cut -f6
 }
 
 # Итоги для человека: имя и текст через табуляцию. read здесь не годится: идущие подряд табуляции он склеивает
 strategy_summaries()
 {
-	strategy_table | awk -F'\t' -v OFS='\t' '$11 != "" {
-		text = ($2 != "") ? "сайты " $2 " из " ($2 + $3) : "сайты не проверены"
-		text = text (($7 != "") ? ", без замирания " $7 " из " ($7 + $8 + $10) : ", замирание не проверено")
-		print $1, "оценка " $11 ": " text
+	strategy_table | awk -F'\t' -v OFS='\t' '$2 != "" || $7 != "" {
+		text = ($2 != "") ? "сайты " $2 "/" ($2 + $3) : "сайты не проверены"
+		text = text (($7 != "") ? ", замирание " $10 "/" ($7 + $8 + $10) : ", замирание не проверено")
+		print $1, text
 	}'
 }
 
@@ -482,7 +467,7 @@ tests_run()
 	result_file="$RESULTS_DIR/test_results_$date_str.txt"
 	REPORT_BODY="$RUN_DIR/report.$$"
 	: > "$REPORT_BODY"
-	local analytics="$RUN_DIR/analytics.$$" analytics_dpi="$RUN_DIR/analytics-dpi.$$" score
+	local analytics="$RUN_DIR/analytics.$$" analytics_dpi="$RUN_DIR/analytics-dpi.$$"
 	: > "$analytics"
 	: > "$analytics_dpi"
 
@@ -505,17 +490,11 @@ tests_run()
 				run_standard
 				printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" >> "$analytics"
 				machine_say result "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL"
-				local saved_dpi=()
-				IFS=$'\t' read -r -a saved_dpi <<< "$(results_get "$RESULTS_DPI" "$name")"
-				score="$(score_calc "$STD_OK" "$STD_ERR" "${saved_dpi[0]:-}" "${saved_dpi[1]:-}" "${saved_dpi[3]:-}")"
 				;;
 			dpi)
 				run_dpi
 				printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics_dpi"
 				machine_say result "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
-				local saved_std=()
-				IFS=$'\t' read -r -a saved_std <<< "$(results_get "$RESULTS_STD" "$name")"
-				score="$(score_calc "${saved_std[0]:-0}" "${saved_std[1]:-0}" "$DPI_OK" "$DPI_FAIL" "$DPI_BLOCKED")"
 				;;
 			full)
 				echo
@@ -535,10 +514,8 @@ tests_run()
 				printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics_dpi"
 				machine_say result "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" \
 					"$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
-				score="$(score_calc "$STD_OK" "$STD_ERR" "$DPI_OK" "$DPI_FAIL" "$DPI_BLOCKED")"
 				;;
 		esac
-		machine_say score "$name" "$score"
 		printf '\n' >> "$REPORT_BODY"
 		engine_stop
 	done
@@ -569,7 +546,7 @@ tests_run()
 tests_report()
 {
 	local type="$1" analytics="$2" analytics_dpi="$3" result_file="$4" width=0 name a b c d e line best="" summary
-	local max_score=-1 max_ok=-1 max_ping=-1 score
+	local max_ok=-1 max_ping=-1
 	summary="$RUN_DIR/summary.$$"
 	: > "$summary"
 	while IFS=$'\t' read -r name _; do
@@ -603,18 +580,14 @@ tests_report()
 		full)
 			local da db dc dd
 			while IFS=$'\t' read -r name a b c d e && IFS=$'\t' read -r _ da db dc dd <&3; do
-				score="$(score_calc "$a" "$b" "$da" "$db" "$dd")"
-				line="$(printf '%-*s : оценка %3d | сайты OK: %3d, ERR: %3d, UNSUP: %3d, Ping OK: %3d | без замирания: %3d, FAIL: %3d, BLOCKED: %3d' \
-					"$width" "$name" "$score" "$a" "$b" "$c" "$d" "$da" "$db" "$dd")"
-				# оценка, при равенстве - больше открытых сайтов, затем пинг
-				if [ "$score" -gt "$max_score" ] || { [ "$score" -eq "$max_score" ] && { [ "$a" -gt "$max_ok" ] ||
-					{ [ "$a" -eq "$max_ok" ] && [ "$d" -gt "$max_ping" ]; }; }; }; then
-					max_score=$score max_ok=$a max_ping=$d best=$name
-				fi
+				line="$(printf '%-*s : сайты %3d/%-3d | замирание %3d/%-3d | HTTP ERR: %3d, UNSUP: %3d, Ping OK: %3d | DPI FAIL: %3d' \
+					"$width" "$name" "$a" "$((a + b))" "$dd" "$((da + db + dd))" "$b" "$c" "$d" "$db")"
 				warn "$line"
 				printf '%s\n' "$line" >> "$summary"
 			done < "$analytics" 3< "$analytics_dpi"
-			echo "Оценка: открытие сайтов весит вдвое больше, чем отсутствие замирания на 16-20 КБ."
+			# лучшая - в том же порядке, что и список: сайты, затем меньше замираний, затем пинг
+			best="$(paste "$analytics" <(cut -f2- "$analytics_dpi") | strategy_rank | head -n1)"
+			echo "Порядок: сначала больше открытых сайтов, при равенстве меньше замираний на 16-20 КБ."
 			;;
 	esac
 
@@ -674,7 +647,7 @@ tests_dialog()
 	while :; do
 		echo
 		info "Какой тест запустить?"
-		echo "  1. Полный: сайты и замирание на 16-20 КБ, общая оценка - рекомендуется"
+		echo "  1. Полный: сайты и замирание на 16-20 КБ - рекомендуется"
 		echo "  2. Только сайты: HTTP, TLS 1.2, TLS 1.3, ping"
 		echo "  3. Только DPI: замирание TCP на 16-20 КБ"
 		echo "  0. Назад"

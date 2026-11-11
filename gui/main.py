@@ -19,7 +19,12 @@ import backend as be  # noqa: E402
 APP_ID = "org.zapretcap.ZapretCap"
 HERE = os.path.dirname(os.path.realpath(__file__))
 RELEASES_URL = "https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
-PROJECT_URL = "https://github.com/Flowseal/zapret-discord-youtube"
+# в окне «О приложении» в этом порядке
+LINKS = [
+    ("Zapret Cap на GitHub", "https://github.com/CapptainnCWC/zapret-cap"),
+    ("zapret2 от bol-van: движок обхода", "https://github.com/bol-van/zapret2"),
+    ("Стратегии Flowseal (zapret-discord-youtube)", "https://github.com/Flowseal/zapret-discord-youtube"),
+]
 POLL_SECONDS = 4
 PORTS_RE = re.compile(r"^\s*[0-9]+(-[0-9]+)?(\s*,\s*[0-9]+(-[0-9]+)?)*\s*$")
 
@@ -159,7 +164,21 @@ class HomePage:
         win.action_widgets += [self.next_row, self.auto_row]
         box.append(trouble)
 
+        updates = Adw.PreferencesGroup(title="Обновления")
+        self.version_row = action_row("Zapret Cap", "")
+        self.version_row.add_prefix(Gtk.Image.new_from_icon_name("software-update-available-symbolic"))
+        self.update_button = centered_button("Проверить обновления", "suggested-action")
+        self.update_button.connect("clicked", lambda _: self.on_check_updates())
+        win.action_widgets.append(self.update_button)
+        self.version_row.add_suffix(self.update_button)
+        updates.add(self.version_row)
+        box.append(updates)
+
     def refresh(self, state):
+        version, flowseal = state.get("version"), state.get("flowseal")
+        if version:
+            self.version_row.set_title(GLib.markup_escape_text(f"Zapret Cap {version}"))
+            self.version_row.set_subtitle(GLib.markup_escape_text(f"Стратегии Flowseal {flowseal}"))
         running = state.running
         self.hero.remove_css_class("hero-on" if not running else "hero-off")
         self.hero.add_css_class("hero-on" if running else "hero-off")
@@ -191,6 +210,30 @@ class HomePage:
             self.on_auto()
         elif answer == "general":
             self.win.run_job(["use", "general"], "Включаю стратегию general…", on_done=self.win.after_switch)
+
+    def on_check_updates(self):
+        """Одно нажатие: проверить стратегии Flowseal и само приложение, а новую версию приложения сразу поставить.
+        Пароль спросит сама система, а новые стратегии Flowseal ставятся только вместе с новой версией приложения."""
+
+        def flowseal_done(rc, lines):
+            flowseal = next(iter(be.visible_lines(lines)), "")
+            self.win.run_job(
+                ["upgrade", "--check"], "Проверяю, вышла ли новая версия приложения…", root=False,
+                on_done=lambda rc2, lines2: app_done(rc2, lines2, flowseal),
+            )
+
+        def app_done(rc, lines, flowseal):
+            info = be.UpgradeInfo(rc, "\n".join(lines))
+            if info.ok and info.newer:
+                self.win.start_upgrade(info)
+                return
+            if info.ok:
+                text = f"Установлена последняя версия {info.current or self.win.state.get('version')}."
+            else:
+                text = f"Не удалось проверить обновление приложения: {info.reason}."
+            self.win.toast(f"{text} {flowseal}".strip())
+
+        self.win.run_job(["update-check"], "Проверяю обновления…", root=False, on_done=flowseal_done)
 
     def on_next(self):
         self.win.run_job(["next"], "Переключаю на следующую стратегию…", on_done=self.win.after_switch)
@@ -237,7 +280,6 @@ class StrategiesPage:
         self.by_name = {}
         self.best = ""
         self.run_results = {}
-        self.run_scores = {}
         self.run_kind = "full"
 
         check = Adw.PreferencesGroup(
@@ -297,8 +339,8 @@ class StrategiesPage:
 
         self.list_group = Adw.PreferencesGroup(
             title="Все стратегии",
-            description="Сначала лучшие по общей оценке. Открытие сайтов весит в ней вдвое больше, чем отсутствие замирания на 16-20 КБ. "
-            "Нажмите на стратегию, чтобы включить её: выбор применяется сразу.",
+            description="Сначала стратегии, которые открывают больше сайтов, при равенстве — с меньшим замиранием на 16-20 КБ. "
+            "Нажмите на стратегию, чтобы включить её.",
         )
         box.append(self.list_group)
 
@@ -337,29 +379,37 @@ class StrategiesPage:
         row.current_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
         row.current_icon.set_tooltip_text("Выбрана, но сейчас выключена")
         row.current_icon.set_visible(False)
-        row.score_badge = badge("")
-        row.score_badge.add_css_class("badge-score")
-        row.score_badge.set_tooltip_text("Общая оценка: открытие сайтов весит вдвое больше, чем отсутствие замирания")
+        # два результата рядом и по отдельности: сколько сайтов открылось и сколько проверок замерло на 16-20 КБ
+        row.sites_badge = badge("")
+        row.freeze_badge = badge("")
+        for widget in (row.sites_badge, row.freeze_badge):
+            widget.add_css_class("badge-result")
         row.add_suffix(row.running_pill)
         row.add_suffix(row.current_icon)
-        row.add_suffix(row.score_badge)
+        row.add_suffix(row.sites_badge)
+        row.add_suffix(row.freeze_badge)
         self.fill_row(row, item)
         return row
 
     @staticmethod
-    def score_kind(score):
-        return "badge-good" if score >= 90 else ("badge-mid" if score >= 60 else "badge-bad")
+    def set_badge(widget, text, kind, tooltip):
+        widget.set_label(text)
+        for old in ("badge-good", "badge-mid", "badge-bad", "badge-neutral"):
+            widget.remove_css_class(old)
+        widget.add_css_class(kind)
+        widget.set_tooltip_text(tooltip)
 
     def fill_row(self, row, item):
-        row.set_subtitle(GLib.markup_escape_text(item.describe()))
-        for kind in ("badge-good", "badge-mid", "badge-bad", "badge-neutral"):
-            row.score_badge.remove_css_class(kind)
-        if item.score is None:
-            row.score_badge.set_visible(False)
-            return
-        row.score_badge.set_label(str(item.score))
-        row.score_badge.add_css_class(self.score_kind(item.score))
-        row.score_badge.set_visible(True)
+        if item.sites_tested:
+            sites_tip = f"Открылось {item.ok} проверок сайтов из {item.sites_total}"
+        else:
+            sites_tip = "не проверялось"
+        if item.dpi_tested:
+            freeze_tip = f"Замерло на 16-20 КБ {item.dpi_blocked or 0} проверок из {item.dpi_total}"
+        else:
+            freeze_tip = "не проверялось"
+        self.set_badge(row.sites_badge, f"сайты {item.sites_text()}", item.sites_kind(), sites_tip)
+        self.set_badge(row.freeze_badge, f"замирание {item.freeze_text()}", item.freeze_kind(), freeze_tip)
 
     def apply_scope(self):
         picking = self.scope.get_selected() == 1
@@ -393,7 +443,6 @@ class StrategiesPage:
     def begin(self, selection, force):
         self.run_kind = TEST_KINDS[self.kind.get_selected()][0]
         self.run_results = {}
-        self.run_scores = {}
         self.best = ""
         self.best_group.set_visible(False)
         self.running_card.set_visible(True)
@@ -419,12 +468,7 @@ class StrategiesPage:
             item = self.by_name.get(fields[1])
             if item and item.apply_result(values):
                 self.update_row(item)
-        elif fields[0] == "score" and len(fields) == 3 and fields[2].isdigit():
-            self.run_scores[fields[1]] = int(fields[2])
-            item = self.by_name.get(fields[1])
-            if item:
-                item.score = int(fields[2])
-                self.update_row(item)
+        # общий балл утилита печатает только для совместимости: окно показывает результаты по отдельности
         elif fields[0] == "best" and len(fields) >= 2:
             self.best = fields[1]
 
@@ -446,7 +490,6 @@ class StrategiesPage:
         self.running_card.set_visible(False)
         if rc == be.TEST_CANCELLED:
             self.run_results = {}
-            self.run_scores = {}
             self.win.toast("Проверка остановлена, прежний обход возвращён")
             self.win.reload_strategies()
             return
@@ -455,14 +498,14 @@ class StrategiesPage:
             self.win.reload_strategies()
             return
         if not self.best:
-            # утилита не назвала лучшую: берём по общей оценке
+            # утилита не назвала лучшую: больше сайтов, затем меньше замирания
             best = be.best_strategy(self.strategies)
             self.best = best.name if best else ""
         if self.best:
             self.show_best()
         else:
             self.win.toast("Ни одна стратегия не запустилась")
-        # оценки из утилиты учитывают и сохранённые результаты прошлых проверок, порядок строится по ним
+        # утилита сохранила результаты, в том числе прошлых проверок: порядок строится по ним
         self.win.reload_strategies()
 
 
@@ -598,22 +641,10 @@ class SettingsPage:
         fakes.add(self.fake_game)
         box.append(fakes)
 
-        updates = Adw.PreferencesGroup(title="Обновления")
-        self.app_row = action_row("Приложение Zapret Cap", "")
-        self.app_update_button = centered_button("Обновить", "suggested-action")
-        self.app_update_button.connect("clicked", lambda _: self.on_app_update())
-        win.action_widgets.append(self.app_update_button)
-        self.app_row.add_suffix(self.app_update_button)
-        updates.add(self.app_row)
+        updates = Adw.PreferencesGroup(title="Обновления", description="Проверить обновления можно на главной вкладке.")
         self.update_check = self.switch_row(
             updates, "Сообщать об обновлениях", "Новые версии приложения и стратегий Flowseal", self.on_update_check
         )
-        check_row = action_row("Новые стратегии", "Узнать, вышла ли новая версия стратегий Flowseal")
-        check_button = centered_button("Проверить")
-        check_button.connect("clicked", lambda _: self.on_check_updates())
-        win.action_widgets.append(check_button)
-        check_row.add_suffix(check_button)
-        updates.add(check_row)
         hosts_row = action_row("Файл hosts", "Может починить веб-версию Telegram и голосовые каналы Discord")
         hosts_button = centered_button("Проверить")
         hosts_button.connect("clicked", lambda _: self.on_hosts())
@@ -669,8 +700,6 @@ class SettingsPage:
             self.ipset_mode.set_selected(ipsets.index(ipset))
             self.ipset_mode.set_subtitle(IPSET_MODES[ipsets.index(ipset)][2])
         self.update_check.set_active(state.flag("update_check"))
-        version = state.get("version")
-        self.app_row.set_subtitle(GLib.markup_escape_text(f"Установлена версия {version}" if version else ""))
         self.shortcut.set_sensitive(self.win.desktop_entry() is not None)
         self.shortcut.set_active(os.path.exists(self.win.shortcut_path()))
         self.shortcut.row.set_subtitle(
@@ -730,27 +759,6 @@ class SettingsPage:
     def on_update_check(self, active):
         if not self.updating:
             self.win.run_job(["update-check", "on" if active else "off"], "Меняю настройку…")
-
-    def on_app_update(self):
-        """Одно нажатие: проверить и сразу обновить, если есть что. Пароль спросит сама система."""
-
-        def on_done(rc, lines):
-            info = be.UpgradeInfo(rc, "\n".join(lines))
-            if not info.ok:
-                self.win.toast(f"Не удалось проверить обновление: {info.reason}")
-            elif info.newer:
-                self.win.start_upgrade(info)
-            else:
-                self.win.toast(f"Установлена последняя версия {info.current or self.win.state.get('version')}")
-
-        self.win.run_job(["upgrade", "--check"], "Проверяю, вышла ли новая версия…", root=False, on_done=on_done)
-
-    def on_check_updates(self):
-        # при новой версии первая строка говорит о ней, а дальше идут подробности для разработчиков
-        self.win.run_job(
-            ["update-check"], "Проверяю обновления…", root=False,
-            on_done=lambda rc, lines: self.win.toast(next(iter(be.visible_lines(lines)), "Не удалось проверить обновления")),
-        )
 
     def on_hosts(self):
         def on_done(rc, lines):
@@ -1174,11 +1182,20 @@ class MainWindow(Adw.ApplicationWindow):
         comments = f"Обход блокировок на основе zapret2. Стратегии Flowseal {flowseal}."
         if hasattr(Adw, "AboutDialog"):
             about = Adw.AboutDialog(application_name="Zapret Cap", application_icon=APP_ID, version=version, comments=comments,
-                                    website=PROJECT_URL, license_type=Gtk.License.MIT_X11)
-            about.present(self)
+                                    license_type=Gtk.License.MIT_X11)
         elif hasattr(Adw, "AboutWindow"):
-            Adw.AboutWindow(transient_for=self, application_name="Zapret Cap", application_icon=APP_ID, version=version, comments=comments,
-                            website=PROJECT_URL, license_type=Gtk.License.MIT_X11).present()
+            about = Adw.AboutWindow(transient_for=self, application_name="Zapret Cap", application_icon=APP_ID, version=version,
+                                    comments=comments, license_type=Gtk.License.MIT_X11)
+        else:
+            return
+        # своё название у каждой ссылки: одна безымянная «Website» не говорила, куда ведёт
+        for title, url in LINKS:
+            about.add_link(title, url)
+        if hasattr(Adw, "AboutDialog"):
+            about.present(self)
+        else:
+            about.present()
+        self.last_about = about
 
     # --- мелочи
 
