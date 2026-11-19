@@ -264,9 +264,10 @@ class HomePage:
 
 # вид проверки: значение для утилиты, подпись в списке и пояснение под ним
 TEST_KINDS = [
-    ("full", "Сайты и замирание", "Рекомендуется: открытие сайтов и замирание соединения на 16-20 КБ"),
-    ("standard", "Только сайты", "Быстрее, но не покажет замирание на 16-20 КБ"),
+    ("full", "Всё сразу", "Рекомендуется: открытие сайтов, замирание на 16-20 КБ и загрузка видео с YouTube"),
+    ("standard", "Только сайты", "Быстрее, но не покажет замирание и зависание загрузки видео"),
     ("dpi", "Только замирание", "Замирание соединения на 16-20 КБ без проверки сайтов"),
+    ("video", "Только видео", "Загрузка ролика с YouTube через yt-dlp, как у музыкальных ботов Discord: скорость и зависания"),
 ]
 
 
@@ -284,8 +285,8 @@ class StrategiesPage:
 
         check = Adw.PreferencesGroup(
             title="Проверка стратегий",
-            description="Приложение по очереди включит стратегии и проверит, открываются ли сайты и не замирает ли соединение "
-            "после первых 16-20 КБ. На это время обход отключается, а потом возвращается.",
+            description="Приложение по очереди включит стратегии и проверит, открываются ли сайты, не замирает ли соединение "
+            "после первых 16-20 КБ и не зависает ли загрузка видео с YouTube. На это время обход отключается, а потом возвращается.",
         )
         self.kind = Adw.ComboRow(title="Что проверять", model=Gtk.StringList.new([label for _, label, _ in TEST_KINDS]))
         self.kind.set_subtitle(TEST_KINDS[0][2])
@@ -339,8 +340,8 @@ class StrategiesPage:
 
         self.list_group = Adw.PreferencesGroup(
             title="Все стратегии",
-            description="Сначала стратегии, которые открывают больше сайтов, при равенстве — с меньшим замиранием на 16-20 КБ. "
-            "Нажмите на стратегию, чтобы включить её.",
+            description="Сначала стратегии, которые открывают больше сайтов, при равенстве — с меньшим замиранием на 16-20 КБ, "
+            "затем — с лучшей загрузкой видео. Нажмите на стратегию, чтобы включить её.",
         )
         box.append(self.list_group)
 
@@ -379,15 +380,18 @@ class StrategiesPage:
         row.current_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
         row.current_icon.set_tooltip_text("Выбрана, но сейчас выключена")
         row.current_icon.set_visible(False)
-        # два результата рядом и по отдельности: сколько сайтов открылось и сколько проверок замерло на 16-20 КБ
+        # результаты рядом и по отдельности: сколько сайтов открылось, сколько проверок замерло на 16-20 КБ
+        # и как качается ролик с YouTube
         row.sites_badge = badge("")
         row.freeze_badge = badge("")
-        for widget in (row.sites_badge, row.freeze_badge):
+        row.video_badge = badge("")
+        for widget in (row.sites_badge, row.freeze_badge, row.video_badge):
             widget.add_css_class("badge-result")
         row.add_suffix(row.running_pill)
         row.add_suffix(row.current_icon)
         row.add_suffix(row.sites_badge)
         row.add_suffix(row.freeze_badge)
+        row.add_suffix(row.video_badge)
         self.fill_row(row, item)
         return row
 
@@ -410,6 +414,7 @@ class StrategiesPage:
             freeze_tip = "не проверялось"
         self.set_badge(row.sites_badge, f"сайты {item.sites_text()}", item.sites_kind(), sites_tip)
         self.set_badge(row.freeze_badge, f"замирание {item.freeze_text()}", item.freeze_kind(), freeze_tip)
+        self.set_badge(row.video_badge, f"видео {item.video_text()}", item.video_kind(), item.video_tooltip())
 
     def apply_scope(self):
         picking = self.scope.get_selected() == 1
@@ -468,7 +473,11 @@ class StrategiesPage:
             item = self.by_name.get(fields[1])
             if item and item.apply_result(values):
                 self.update_row(item)
-        # общий балл утилита печатает только для совместимости: окно показывает результаты по отдельности
+        elif fields[0] == "video" and len(fields) >= 3:
+            values = [int(value) for value in fields[2:] if value.strip().isdigit()]
+            item = self.by_name.get(fields[1])
+            if item and item.apply_video(values):
+                self.update_row(item)
         elif fields[0] == "best" and len(fields) >= 2:
             self.best = fields[1]
 

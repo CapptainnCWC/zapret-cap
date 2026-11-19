@@ -129,10 +129,11 @@ def scenario():
     check("кнопка выключает обход", not state(window).running)
     check("главная показывает выключенное состояние", window.home.hero.has_css_class("hero-off"))
 
-    print("Проверка выбранных стратегий: сайты и замирание", flush=True)
+    print("Проверка выбранных стратегий: сайты, замирание и видео", flush=True)
     window.show_page("strategies")
     page = window.strategies
-    check("по умолчанию проверяются и сайты, и замирание", page.kind.get_selected() == 0)
+    check("по умолчанию проверяется всё сразу", page.kind.get_selected() == 0)
+    check("есть отдельная проверка видео", [kind for kind, _, _ in app.TEST_KINDS] == ["full", "standard", "dpi", "video"])
     page.scope.set_selected(1)
     chosen = [name for name in page.names if name in ("general", "general (ALT5)")]
     check("обе стратегии есть в списке", len(chosen) == 2)
@@ -160,6 +161,13 @@ def scenario():
         page.rows[name].sites_badge.get_label().startswith("сайты ") and "/" in page.rows[name].sites_badge.get_label()
         and page.rows[name].freeze_badge.get_label().startswith("замирание ") and "/" in page.rows[name].freeze_badge.get_label()
         for name in chosen))
+    if os.environ.get("ZAPRET_YTDLP"):
+        check("у строк есть скорость загрузки видео", all(
+            page.rows[name].video_badge.get_label().startswith("видео ") and "/с" in page.rows[name].video_badge.get_label()
+            and page.rows[name].video_badge.has_css_class("badge-good") for name in chosen))
+        check("в карточке есть видео", "видео " in subtitle)
+    check("непроверенные: прочерк у видео", all(
+        page.rows[name].video_badge.get_label() == "видео —" for name in page.rows if not page.by_name[name].video_tested))
     check("непроверенные помечены прочерком", all(
         page.rows[name].sites_badge.get_label() == "сайты —" for name in page.rows if not page.by_name[name].tested))
     tested = [name for name in page.rows if page.by_name[name].tested]

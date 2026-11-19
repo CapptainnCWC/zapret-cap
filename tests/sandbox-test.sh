@@ -68,7 +68,7 @@ EOF
 mount --bind "$WORK/hosts" /etc/hosts
 
 cat > "$WORK/server.py" <<'EOF'
-import http.server, socketserver, ssl, sys, threading
+import http.server, socketserver, ssl, sys, threading, time
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def _reply(self):
@@ -80,7 +80,29 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "2")
         self.end_headers()
         self.wfile.write(body)
-    do_GET = do_HEAD = do_POST = _reply
+    # "ролик" для теста видео: /video целиком, /video-slow по 20 КБ/с, /video-stall замирает после 18 КБ
+    def do_GET(self):
+        if not self.path.startswith("/video"):
+            return self._reply()
+        size = 4000000
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mp4")
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        if self.path.startswith("/video-stall"):
+            self.wfile.write(b"\0" * 18000)
+            self.wfile.flush()
+            time.sleep(30)
+            return
+        step, pause = (2000, 0.1) if self.path.startswith("/video-slow") else (65536, 0)
+        sent = 0
+        while sent < size:
+            self.wfile.write(b"\0" * min(step, size - sent))
+            sent += step
+            if pause:
+                self.wfile.flush()
+                time.sleep(pause)
+    do_HEAD = do_POST = _reply
     def log_message(self, *a): pass
 class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
@@ -126,6 +148,32 @@ YouTubeWeb = "https://www.youtube.com"
 GoogleMain = "https://www.google.com"
 ServerPing = "PING:$SERVER_IP"
 EOF
+
+# Тест видео: настоящий yt-dlp качает "ролик" с локального сервера через движок. Разбор ролика (-J) подменён:
+# YouTube здесь нет, поэтому описание с прямой ссылкой выдаёт заглушка. Путь к yt-dlp - SANDBOX_YTDLP
+# (официальная сборка в один файл) или yt-dlp из системы; без него тест видео пропускается
+YTDLP_REAL="${SANDBOX_YTDLP:-$(command -v yt-dlp 2>/dev/null)}"
+if [ -n "$YTDLP_REAL" ] && [ -f "$YTDLP_REAL" ]; then
+	# yt-dlp работает от nobody: ему нужен файл, доступный всем
+	cp "$YTDLP_REAL" "$WORK/yt-dlp"
+	chmod 644 "$WORK/yt-dlp"
+	# заглушка записывает, от какого пользователя её запустили
+	mkdir -m 1777 "$WORK/ytdlp-uid"
+	cat > "$WORK/yt-dlp-stub" <<EOF
+#!/bin/sh
+id -u > "$WORK/ytdlp-uid/last"
+for arg; do
+	if [ "\$arg" = -J ]; then
+		case "\$*" in *stall*) path=/video-stall ;; *slow*) path=/video-slow ;; *) path=/video ;; esac
+		printf '{"id":"t","title":"t","extractor":"generic","extractor_key":"Generic","webpage_url":"https://www.youtube.com/","formats":[{"format_id":"140","url":"https://www.youtube.com%s","ext":"m4a","vcodec":"none","acodec":"mp4a","protocol":"https"}]}\n' "\$path"
+		exit 0
+	fi
+done
+exec python3 -I "$WORK/yt-dlp" "\$@"
+EOF
+	chmod 755 "$WORK/yt-dlp-stub"
+	export ZAPRET_YTDLP="$WORK/yt-dlp-stub" ZAPRET_YTDLP_OPTS="--no-check-certificates"
+fi
 
 # проверка окна приложения: то же окружение, но вместо команд кнопки нажимает tests/gui_test.py
 if [ -n "${SANDBOX_GUI:-}" ]; then
@@ -316,18 +364,57 @@ check "DPI-тест: ipset возвращён" test "$(sha256sum < "$IPSET")" = 
 check "DPI-тест: временных файлов нет" test ! -e "$APP/lists/ipset-all.test-backup.txt"
 check "DPI-тест: итог сохранён" test -s "$ZAPRET_STATE/last-dpi.tsv"
 
+video_line() { grep "^@video	$2	" "$1" | tail -n1; }
+if [ -n "${ZAPRET_YTDLP:-}" ]; then
+	echo
+	echo "=== Тест загрузки видео ==="
+	"$Z" test video 1,2 --machine </dev/null >"$WORK/video.out" 2>&1
+	VIDEO_FIRST="$("$Z" list --tsv | head -n1 | cut -f1)"
+	check "тест видео: по результату на стратегию" test "$(grep -c '^@video' "$WORK/video.out")" = 2
+	check "тест видео: в результате 5 чисел" sh -c "grep '^@video' '$WORK/video.out' | awk -F'\t' 'NF != 7 { bad = 1 } END { exit bad }'"
+	check "тест видео: ролик скачан целиком" sh -c "grep '^@video' '$WORK/video.out' | awk -F'\t' '\$3 != 1 || \$5 != 4000000 { bad = 1 } END { exit bad }'"
+	check "тест видео: скорость в итогах" grep -qE 'видео [0-9,]+ [КМ]Б/с' "$WORK/video.out"
+	check "тест видео: лучшая стратегия указана" grep -q '^@best' "$WORK/video.out"
+	check "тест видео: итог сохранён" test "$(grep -c . "$ZAPRET_STATE/last-video.tsv")" = 2
+	check "тест видео: ролик не сохранён и временных папок нет" sh -c "! find '$ZAPRET_RUN' '$APP' \( -name 'video.*' -o -name '*.m4a' \) | grep -q ."
+	check "тест видео: yt-dlp работал не от root" test "$(cat "$WORK/ytdlp-uid/last" 2>/dev/null)" = 65534
+	"$Z" list >"$WORK/list.out" 2>&1
+	check "список показывает скорость видео" grep -qE 'видео [0-9,]+ [КМ]Б/с' "$WORK/list.out"
+
+	STARTED=$SECONDS
+	ZAPRET_VIDEO_URL="https://www.youtube.com/watch?v=stall" TEST_VIDEO_STALL=2 "$Z" test video 1 --machine </dev/null >"$WORK/video-stall.out" 2>&1
+	line="$(video_line "$WORK/video-stall.out" "$VIDEO_FIRST")"
+	check "зависание: поток остановился, а не дошёл до конца" sh -c "printf '%s\n' '$line' | awk -F'\t' '\$3 == 0 && \$4 == 1 && \$5 > 0 && \$5 < 100000 { ok = 1 } END { exit !ok }'"
+	check "зависание: в итоге написано, на скольких КБ" grep -q 'зависло на [0-9]* КБ' "$WORK/video-stall.out"
+	check "зависание: тест не ждал всё отведённое время" test $((SECONDS - STARTED)) -lt 15
+	ZAPRET_VIDEO_URL="https://www.youtube.com/watch?v=slow" TEST_VIDEO_TIMEOUT=4 "$Z" test video 1 --machine </dev/null >"$WORK/video-slow.out" 2>&1
+	line="$(video_line "$WORK/video-slow.out" "$VIDEO_FIRST")"
+	check "медленно: данные шли, но ролик не докачался" sh -c "printf '%s\n' '$line' | awk -F'\t' '\$3 == 0 && \$4 == 0 && \$5 > 0 && \$5 < 4000000 { ok = 1 } END { exit !ok }'"
+	check "медленно: в итоге написано, что не докачалось" grep -q 'не докачалось' "$WORK/video-slow.out"
+	VIDEO_SECOND="$("$Z" list --tsv | sed -n 2p | cut -f1)"
+	VIDEO_BEST="$(Z_HOME="$APP" bash -c 'for m in common engine service tests switch lists diag menu api upgrade; do . "$Z_HOME/lib/$m.sh"; done; printf "%s\n" "$@" | results_join /dev/null /dev/null "$RESULTS_VID" | strategy_rank | head -n1' _ "$VIDEO_FIRST" "$VIDEO_SECOND")"
+	check "скачавшая стратегия стоит выше недокачавшей" test "$VIDEO_BEST" = "$VIDEO_SECOND"
+else
+	echo
+	echo "=== Тест загрузки видео: пропущен, нет yt-dlp (SANDBOX_YTDLP) ==="
+fi
+
 echo
-echo "=== Полный тест: сайты и замирание ==="
+echo "=== Полный тест: сайты, замирание и видео ==="
 STD_BEFORE="$(cat "$ZAPRET_STATE/last-test.tsv" 2>/dev/null)"
 MONITOR_HOST=dpi.test MONITOR_TIMEOUT=3 "$Z" test full 1,2 --machine </dev/null >"$WORK/full.out" 2>&1
 check "полный тест отработал" grep -q 'замирание' "$WORK/full.out"
 check "полный тест: по два результата на стратегию" test "$(grep -c '^@result' "$WORK/full.out")" = 2
 check "полный тест: в результате оба теста" sh -c "grep '^@result' '$WORK/full.out' | head -n1 | awk -F'\t' 'NF == 11 { ok = 1 } END { exit !ok }'"
+if [ -n "${ZAPRET_YTDLP:-}" ]; then
+	check "полный тест: загрузка видео у каждой стратегии" test "$(grep -c '^@video' "$WORK/full.out")" = 2
+	check "полный тест: видео в итогах" grep -q '| видео ' "$WORK/full.out"
+fi
 check "полный тест: лучшая стратегия указана" grep -q '^@best' "$WORK/full.out"
 check "полный тест: ipset возвращён" test "$(sha256sum < "$IPSET")" = "$IPSET_ORIG"
 check "полный тест: временных файлов нет" test ! -e "$APP/lists/ipset-all.test-backup.txt"
 check "в списке у проверенных оба итога" test "$("$Z" list --tsv | awk -F'\t' 'NR <= 2 && $2 != "" && $7 != ""' | wc -l)" = 2
-check "в списке 10 полей" sh -c "'$Z' list --tsv | awk -F'\t' 'NF != 10 { bad = 1 } END { exit bad }'"
+check "в списке 15 полей" sh -c "'$Z' list --tsv | awk -F'\t' 'NF != 15 { bad = 1 } END { exit bad }'"
 check "итоги других стратегий не стёрты" test "$(grep -c . "$ZAPRET_STATE/last-test.tsv")" -ge "$(printf '%s\n' "$STD_BEFORE" | grep -c .)"
 FIRST_IN_ORDER="$(Z_HOME="$APP" bash -c 'for m in common engine service tests switch lists diag menu api upgrade; do . "$Z_HOME/lib/$m.sh"; done; strategy_order | head -n1')"
 BEST_SITES="$("$Z" list --tsv | awk -F'\t' '$2 != "" { r = $2 / ($2 + $3); if (r > m) m = r } END { print m }')"
@@ -404,6 +491,9 @@ if [ -n "${SANDBOX_SHOW:-}" ]; then
 	sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r$//' "$OUT" | head -n 40
 	sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r$//' "$WORK/menu.out" | head -n 46
 	sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$WORK/diag.out"
+	for out in video video-stall video-slow; do
+		[ -f "$WORK/$out.out" ] && sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$WORK/$out.out" | grep -v '^@' | tail -n 14
+	done
 	"$Z" list | head -n 6
 fi
 

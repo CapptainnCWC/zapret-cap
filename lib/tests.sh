@@ -18,14 +18,23 @@ tests_defaults()
 	TARGETS_FILE=${ZAPRET_TARGETS:-$UTILS_DIR/targets.txt}
 	# дополнительные опции curl, например --interface
 	read -r -a CURL_EXTRA <<< "${ZAPRET_CURL_OPTS:-}"
+	# загрузка видео: ролик Blender Foundation, аудиодорожка 140 весит 10,3 МБ
+	VIDEO_URL=${ZAPRET_VIDEO_URL:-https://www.youtube.com/watch?v=aqz-KE-bpKQ}
+	VIDEO_FORMAT=${ZAPRET_VIDEO_FORMAT:-140/251/ba}
+	# сколько секунд даётся на загрузку и сколько секунд без данных считается зависанием
+	VIDEO_TIMEOUT=${TEST_VIDEO_TIMEOUT:-20}
+	VIDEO_STALL=${TEST_VIDEO_STALL:-5}
+	read -r -a VIDEO_EXTRA <<< "${ZAPRET_YTDLP_OPTS:-}"
 }
 
-# --- сохранённые итоги обоих тестов
+# --- сохранённые итоги тестов
 
 # имя, ok, ошибки, не поддерживается, ping ok, ping нет
 RESULTS_STD="$STATE_DIR/last-test.tsv"
 # имя, ok, ошибки, не поддерживается, замирания
 RESULTS_DPI="$STATE_DIR/last-dpi.tsv"
+# имя, скачано целиком (1/0), зависло (1/0), байт, миллисекунд, размер файла
+RESULTS_VID="$STATE_DIR/last-video.tsv"
 
 # Новые строки заменяют прежние итоги тех же стратегий, итоги остальных сохраняются
 results_merge()
@@ -39,44 +48,89 @@ results_merge()
 	mv -f "$tmp" "$file"
 }
 
-# Все стратегии с итогами обоих тестов: имя, 5 полей теста сайтов, 4 поля DPI-теста. Пустое поле - тест не запускался
+# К именам со входа дописывает итоги из трёх файлов: 5 полей теста сайтов, 4 поля DPI-теста, 5 полей теста видео.
+# Пустое поле - тест не запускался
+results_join()
+{
+	awk -F'\t' -v OFS='\t' -v std="$1" -v dpi="$2" -v vid="$3" '
+		function load(file, count, into,   line, f, i, v) {
+			while ((getline line < file) > 0) {
+				split(line, f, "\t")
+				v = f[2]
+				for (i = 3; i <= count + 1; i++) v = v "\t" f[i]
+				into[f[1]] = v
+			}
+			close(file)
+		}
+		function blank(count,   v, i) {
+			v = ""
+			for (i = 1; i < count; i++) v = v "\t"
+			return v
+		}
+		BEGIN { load(std, 5, s); load(dpi, 4, d); load(vid, 5, w) }
+		{ print $0, (($0 in s) ? s[$0] : blank(5)), (($0 in d) ? d[$0] : blank(4)), (($0 in w) ? w[$0] : blank(5)) }'
+}
+
+# Все стратегии с сохранёнными итогами: имя и 14 полей, см. results_join
 strategy_table()
 {
-	strategy_names | awk -F'\t' -v OFS='\t' -v std="$RESULTS_STD" -v dpi="$RESULTS_DPI" '
-		BEGIN {
-			while ((getline line < std) > 0) {
-				split(line, f, "\t")
-				s[f[1]] = f[2] "\t" f[3] "\t" f[4] "\t" f[5] "\t" f[6]
-			}
-			while ((getline line < dpi) > 0) {
-				split(line, f, "\t")
-				d[f[1]] = f[2] "\t" f[3] "\t" f[4] "\t" f[5]
-			}
-		}
-		{ print $0, (($0 in s) ? s[$0] : "\t\t\t\t"), (($0 in d) ? d[$0] : "\t\t\t") }'
+	strategy_names | results_join "$RESULTS_STD" "$RESULTS_DPI" "$RESULTS_VID"
 }
 
 # Порядок от лучшей к худшей: сначала доля открытых сайтов, при равенстве - меньшая доля замираний,
+# затем загрузка видео (скачалось, медленно, зависло, не скачалось; внутри - скорость с точностью до двух раз),
 # затем больше ответов на ping. Открытие сайтов главное: стратегия, которая их не открывает, бесполезна.
 # Читает строки strategy_table, печатает имена. Стратегии без итогов идут последними в обычном порядке
 strategy_rank()
 {
 	awk -F'\t' -v OFS='\t' '{
 		n++
-		tested = ($2 != "" || $7 != "")
+		tested = ($2 != "" || $7 != "" || $11 != "")
 		site = ($2 != "" && $2 + $3 > 0) ? int($2 * 1000 / ($2 + $3)) : -1
 		freeze = ($7 != "" && $7 + $8 + $10 > 0) ? int($10 * 1000 / ($7 + $8 + $10)) : 1001
+		if ($11 == "") {
+			video = 9999
+		} else {
+			kind = ($11 == 1) ? 0 : (($12 == 1) ? 2 : (($13 > 0) ? 1 : 3))
+			speed = ($14 > 0) ? $13 / $14 : 0
+			video = kind * 100 + 60 - ((speed >= 1) ? int(log(speed) / log(2)) : 0)
+		}
 		ping = ($5 != "") ? $5 : -1
-		print (tested ? 0 : 1), 1000 - site, freeze, 1000 - ping, n, $1
-	}' | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n | cut -f6
+		print (tested ? 0 : 1), 1000 - site, freeze, video, 1000 - ping, n, $1
+	}' | sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5n -k6,6n | cut -f7
+}
+
+# awk-функция для итога загрузки видео: "8,3 МБ/с", "120 КБ/с, не докачалось", "зависло на 18 КБ", "не скачалось".
+# Дробная часть через запятую и без printf: он зависит от локали
+AWK_VIDEO_TEXT='
+	function dec(x,   t) { t = int(x * 10 + 0.5); return int(t / 10) "," (t % 10) }
+	function vsize(b) { return (b >= 1000000) ? dec(b / 1000000) " МБ" : int(b / 1000) " КБ" }
+	function vspeed(b, ms,   s) { s = (ms > 0) ? b / ms : 0; return (s >= 1000) ? dec(s / 1000) " МБ/с" : int(s) " КБ/с" }
+	function video_text(ok, stall, b, ms) {
+		if (ok == 1) return vspeed(b, ms)
+		if (stall == 1) return "зависло на " vsize(b)
+		if (b > 0) return vspeed(b, ms) ", не докачалось"
+		return "не скачалось"
+	}'
+
+video_text()
+{
+	awk -v ok="$1" -v stall="$2" -v b="$3" -v ms="$4" "$AWK_VIDEO_TEXT"' BEGIN { print video_text(ok, stall, b, ms) }'
+}
+
+video_size()
+{
+	awk -v b="$1" "$AWK_VIDEO_TEXT"' BEGIN { print vsize(b) }'
 }
 
 # Итоги для человека: имя и текст через табуляцию. read здесь не годится: идущие подряд табуляции он склеивает
 strategy_summaries()
 {
-	strategy_table | awk -F'\t' -v OFS='\t' '$2 != "" || $7 != "" {
+	strategy_table | awk -F'\t' -v OFS='\t' "$AWK_VIDEO_TEXT"'
+	$2 != "" || $7 != "" || $11 != "" {
 		text = ($2 != "") ? "сайты " $2 "/" ($2 + $3) : "сайты не проверены"
 		text = text (($7 != "") ? ", замирание " $10 "/" ($7 + $8 + $10) : ", замирание не проверено")
+		text = text (($11 != "") ? ", видео " video_text($11, $12, $13, $14) : ", видео не проверено")
 		print $1, text
 	}'
 }
@@ -339,6 +393,160 @@ run_dpi()
 	rm -rf "$tmp"
 }
 
+# --- загрузка видео через yt-dlp
+#
+# Так YouTube качают музыкальные боты Discord и приложения-загрузчики. Замедление googlevideo.com здесь видно
+# сразу, а тест сайтов его не замечает: ему хватает первых байт ответа. Ролик никуда не сохраняется,
+# yt-dlp отдаёт его в stdout, а тот направлен в /dev/null. Подробности для других платформ: ytdldownloadtest.md
+
+YTDLP_REPO="yt-dlp/yt-dlp"
+YTDLP_DIR="$STATE_DIR/yt-dlp"
+
+# Официальная сборка yt-dlp - один файл для Python 3.10 и новее
+ytdlp_python_ok()
+{
+	command -v python3 >/dev/null 2>&1 && python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null
+}
+
+# Своя копия последнего релиза yt-dlp: в дистрибутивах он часто отстаёт, а YouTube меняется каждые несколько недель.
+# Файл сверяется с SHA2-256SUMS того же релиза. Без связи с GitHub годится уже скачанная копия
+ytdlp_fetch()
+{
+	local tag have tmp sum base
+	have="$(cat "$YTDLP_DIR/version" 2>/dev/null)"
+	tag="$(curl -fsSL -m 15 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$YTDLP_REPO/releases/latest" 2>/dev/null |
+		python3 -I -c 'import json, sys; print(json.load(sys.stdin).get("tag_name", ""))' 2>/dev/null)"
+	if ! [[ "$tag" =~ ^[0-9A-Za-z._-]+$ ]]; then
+		[ -s "$YTDLP_DIR/yt-dlp" ] && return 0
+		warn "Не удалось узнать последнюю версию yt-dlp: нет связи с GitHub."
+		return 1
+	fi
+	[ "$tag" = "$have" ] && [ -s "$YTDLP_DIR/yt-dlp" ] && return 0
+	echo "Скачиваю yt-dlp $tag..."
+	base="https://github.com/$YTDLP_REPO/releases/download/$tag"
+	tmp="$(mktemp -d "$RUN_DIR/yt-dlp.XXXXXX")"
+	if curl -fsSL -m 120 -o "$tmp/yt-dlp" "$base/yt-dlp" && curl -fsSL -m 30 -o "$tmp/sums" "$base/SHA2-256SUMS"; then
+		sum="$(awk '$2 == "yt-dlp" { print $1 }' "$tmp/sums")"
+		if [ -n "$sum" ] && [ "$(sha256sum "$tmp/yt-dlp" | cut -d' ' -f1)" = "$sum" ]; then
+			mkdir -p "$YTDLP_DIR"
+			chmod 755 "$YTDLP_DIR"
+			chmod 644 "$tmp/yt-dlp"
+			mv -f "$tmp/yt-dlp" "$YTDLP_DIR/yt-dlp"
+			printf '%s\n' "$tag" > "$YTDLP_DIR/version"
+			chmod 644 "$YTDLP_DIR/version"
+		else
+			warn "Контрольная сумма yt-dlp не сошлась, файл отброшен."
+		fi
+	else
+		warn "Не удалось скачать yt-dlp."
+	fi
+	rm -rf -- "${tmp:?}"
+	[ -s "$YTDLP_DIR/yt-dlp" ]
+}
+
+# yt-dlp с общими настройками. $1 - сколько секунд ему дать. Скачанная из интернета программа работает
+# от nobody, а не от root, с пустым окружением и без настроек пользователя
+ytdlp()
+{
+	local limit="$1"
+	shift
+	(cd "$VIDEO_DIR" && exec timeout "$limit" "${VIDEO_AS[@]}" env -i HOME="$VIDEO_DIR" PATH="$PATH" LANG=C.UTF-8 \
+		"${VIDEO_CMD[@]}" --ignore-config --no-cache-dir --no-playlist --socket-timeout "$VIDEO_STALL" "${VIDEO_EXTRA[@]}" "$@")
+}
+
+# Ссылки на поток действуют несколько часов и привязаны к адресу компьютера, поэтому ролик разбирается один раз,
+# а каждая стратегия только качает его. В фоне, чтобы тест можно было сразу остановить
+video_extract()
+{
+	rm -f "$VIDEO_DIR/info.json"
+	ytdlp "$1" -J "$VIDEO_URL" > "$VIDEO_DIR/info.part" 2> "$VIDEO_DIR/extract.log" &
+	wait $!
+	if [ -s "$VIDEO_DIR/info.part" ] && grep -q '"formats"' "$VIDEO_DIR/info.part"; then
+		chmod 644 "$VIDEO_DIR/info.part"
+		mv -f "$VIDEO_DIR/info.part" "$VIDEO_DIR/info.json"
+		return 0
+	fi
+	rm -f "$VIDEO_DIR/info.part"
+	return 1
+}
+
+# Находит yt-dlp и разбирает ролик, пока работает обход пользователя. Если разобрать не вышло,
+# это сделает первая стратегия, при которой YouTube ответит
+video_prepare()
+{
+	local uid gid
+	VIDEO_CMD=() VIDEO_AS=() VIDEO_DIR=""
+	if [ -n "${ZAPRET_YTDLP:-}" ]; then
+		VIDEO_CMD=("$ZAPRET_YTDLP")
+	elif ytdlp_python_ok && ytdlp_fetch; then
+		VIDEO_CMD=(python3 -I "$YTDLP_DIR/yt-dlp")
+	elif command -v yt-dlp >/dev/null 2>&1; then
+		warn "Беру yt-dlp из системы: если он устарел, YouTube может не отдать ролик."
+		VIDEO_CMD=(yt-dlp)
+	else
+		ytdlp_python_ok || warn "Для теста видео нужен Python 3.10 или новее."
+		return 1
+	fi
+	VIDEO_DIR="$(mktemp -d "$RUN_DIR/video.XXXXXX")"
+	if [ "$(id -u)" = 0 ] && command -v setpriv >/dev/null 2>&1 && uid="$(id -u nobody 2>/dev/null)" \
+		&& gid="$(id -g nobody 2>/dev/null)" && setpriv --reuid="$uid" --regid="$gid" --clear-groups true 2>/dev/null; then
+		chown "$uid:$gid" "$VIDEO_DIR"
+		VIDEO_AS=(setpriv --reuid="$uid" --regid="$gid" --clear-groups)
+	fi
+	echo "Получаю ссылку на тестовый ролик..."
+	video_extract 60 || warn "YouTube пока не ответил, ссылку получит первая подходящая стратегия."
+	return 0
+}
+
+video_cleanup()
+{
+	[ -n "${VIDEO_DIR:-}" ] && rm -rf -- "${VIDEO_DIR:?}"
+	VIDEO_DIR=""
+}
+
+# Загрузка ролика при одной стратегии. Заполняет VID_OK, VID_STALL, VID_BYTES, VID_MS, VID_TOTAL:
+# скачан целиком; данные перестали идти на $VIDEO_STALL с (yt-dlp сам завершается с ошибкой); сколько байт
+# и за сколько миллисекунд пришло; размер файла. Если к концу $VIDEO_TIMEOUT с данные ещё идут, это "медленно"
+run_video()
+{
+	local log="$VIDEO_DIR/download.log" rc status got total elapsed error
+	VID_OK=0 VID_STALL=0 VID_BYTES=0 VID_MS=0 VID_TOTAL=0
+	if [ ! -s "$VIDEO_DIR/info.json" ] && ! video_extract "$VIDEO_TIMEOUT"; then
+		err "  YouTube не отдал ссылку на ролик."
+		error="$(grep -m1 '^ERROR' "$VIDEO_DIR/extract.log" 2>/dev/null)"
+		[ -n "$error" ] && printf '  %s\n' "$error"
+		[ -n "${REPORT_BODY:-}" ] && printf '  Video: status=NO_LINK %s\n' "$error" >> "$REPORT_BODY"
+		return 0
+	fi
+	ytdlp "$VIDEO_TIMEOUT" --load-info-json "$VIDEO_DIR/info.json" -f "$VIDEO_FORMAT" -o - \
+		--retries 0 --fragment-retries 0 --extractor-retries 0 --newline \
+		--progress-template 'download:@video %(progress.status)s %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.elapsed)s' \
+		> /dev/null 2> "$log" &
+	wait $!
+	rc=$?
+	read -r _ status got total elapsed < <(grep '^@video ' "$log" | tail -n1)
+	[[ "${got:-}" =~ ^[0-9]+$ ]] && VID_BYTES=$got
+	[[ "${total:-}" =~ ^[0-9]+$ ]] && VID_TOTAL=$total
+	[[ "${elapsed:-}" =~ ^[0-9.]+$ ]] && VID_MS="$(awk -v s="$elapsed" 'BEGIN { print int(s * 1000) }')"
+	if [ "${status:-}" = finished ]; then
+		VID_OK=1
+		ok "  Видео скачано: $(video_size "$VID_BYTES"), $(video_text 1 0 "$VID_BYTES" "$VID_MS")."
+	elif [ "$rc" = 124 ] && [ "$VID_BYTES" -gt 0 ]; then
+		warn "  Видео качается медленно: $(video_text 1 0 "$VID_BYTES" "$VID_MS"), за $VIDEO_TIMEOUT с пришло $(video_size "$VID_BYTES") из $(video_size "$VID_TOTAL")."
+	elif [ "$VID_BYTES" -gt 0 ]; then
+		VID_STALL=1
+		err "  Видео $(video_text 0 1 "$VID_BYTES" "$VID_MS"): поток остановился, похоже, его режет цензор."
+	else
+		err "  Видео не скачалось."
+	fi
+	error="$(grep -m1 '^ERROR' "$log" 2>/dev/null)"
+	[ "$VID_OK" = 0 ] && [ -n "$error" ] && printf '  %s\n' "$error"
+	[ -n "${REPORT_BODY:-}" ] && printf '  Video: ok=%s stall=%s bytes=%s total=%s time=%sms rc=%s %s\n' \
+		"$VID_OK" "$VID_STALL" "$VID_BYTES" "$VID_TOTAL" "$VID_MS" "$rc" "$error" >> "$REPORT_BODY"
+	rm -f "$log"
+	return 0
+}
+
 # --- выбор стратегий
 
 # разбирает "1,3,5-7" в массив индексов SELECTED (с нуля). 0 или all - все
@@ -386,6 +594,7 @@ tests_cleanup()
 	rm -f "$RUN_DIR/test.pid"
 	engine_stop
 	ipset_test_restore
+	video_cleanup
 	info "Возвращаю обход в исходное состояние..."
 	service_resume
 }
@@ -405,11 +614,11 @@ tests_interrupted()
 	exit 130
 }
 
-# tests_run standard|dpi "выбор" apply_best(1/0)
+# tests_run full|standard|dpi|video "выбор" apply_best(1/0)
 tests_run()
 {
 	local type="$1" selection="$2" apply_best="${3:-0}"
-	local names=() name i n=0 foreign result_file date_str
+	local names=() name i n=0 foreign result_file date_str video=0
 	mapfile -t names < <(strategy_names)
 	if [ ${#names[@]} -eq 0 ]; then
 		err "В папке strategies нет ни одной стратегии."
@@ -437,12 +646,23 @@ tests_run()
 	# прошлый запуск мог быть убит вместе с окном терминала
 	ipset_test_restore
 
-	if [ "$type" != dpi ]; then
+	if [ "$type" = standard ] || [ "$type" = full ]; then
 		targets_load
 		echo "Целей загружено: ${#TARGET_NAMES[@]}"
 	fi
-	if [ "$type" != standard ]; then
+	if [ "$type" = dpi ] || [ "$type" = full ]; then
 		dpi_targets_load || return 1
+	fi
+	# yt-dlp и ссылка на ролик нужны до того, как обход будет отключён
+	if [ "$type" = video ] || [ "$type" = full ]; then
+		if video_prepare; then
+			video=1
+		elif [ "$type" = video ]; then
+			err "Тест видео недоступен: нет yt-dlp."
+			return 1
+		else
+			warn "Загрузка видео проверяться не будет: нет yt-dlp."
+		fi
 	fi
 
 	TESTS_ACTIVE=1
@@ -467,9 +687,12 @@ tests_run()
 	result_file="$RESULTS_DIR/test_results_$date_str.txt"
 	REPORT_BODY="$RUN_DIR/report.$$"
 	: > "$REPORT_BODY"
-	local analytics="$RUN_DIR/analytics.$$" analytics_dpi="$RUN_DIR/analytics-dpi.$$"
+	local analytics="$RUN_DIR/analytics.$$" analytics_dpi="$RUN_DIR/analytics-dpi.$$" analytics_vid="$RUN_DIR/analytics-video.$$"
+	local order="$RUN_DIR/order.$$"
 	: > "$analytics"
 	: > "$analytics_dpi"
+	: > "$analytics_vid"
+	: > "$order"
 
 	for i in "${SELECTED[@]}"; do
 		name="${names[$i]}"
@@ -485,6 +708,7 @@ tests_run()
 			printf '  не запустилась\n\n' >> "$REPORT_BODY"
 			continue
 		fi
+		printf '%s\n' "$name" >> "$order"
 		case "$type" in
 			standard)
 				run_standard
@@ -495,6 +719,11 @@ tests_run()
 				run_dpi
 				printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics_dpi"
 				machine_say result "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
+				;;
+			video)
+				run_video
+				printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$VID_OK" "$VID_STALL" "$VID_BYTES" "$VID_MS" "$VID_TOTAL" >> "$analytics_vid"
+				machine_say video "$name" "$VID_OK" "$VID_STALL" "$VID_BYTES" "$VID_MS" "$VID_TOTAL"
 				;;
 			full)
 				echo
@@ -514,6 +743,13 @@ tests_run()
 				printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED" >> "$analytics_dpi"
 				machine_say result "$name" "$STD_OK" "$STD_ERR" "$STD_UNSUP" "$STD_PING_OK" "$STD_PING_FAIL" \
 					"$DPI_OK" "$DPI_FAIL" "$DPI_UNSUP" "$DPI_BLOCKED"
+				if [ "$video" = 1 ]; then
+					echo
+					info "  Загрузка видео с YouTube:"
+					run_video
+					printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$VID_OK" "$VID_STALL" "$VID_BYTES" "$VID_MS" "$VID_TOTAL" >> "$analytics_vid"
+					machine_say video "$name" "$VID_OK" "$VID_STALL" "$VID_BYTES" "$VID_MS" "$VID_TOTAL"
+				fi
 				;;
 		esac
 		printf '\n' >> "$REPORT_BODY"
@@ -522,14 +758,15 @@ tests_run()
 
 	echo
 	ok "Все тесты завершены."
-	tests_report "$type" "$analytics" "$analytics_dpi" "$result_file"
-	rm -f "$REPORT_BODY" "$analytics" "$analytics_dpi"
+	tests_report "$type" "$analytics" "$analytics_dpi" "$analytics_vid" "$order" "$result_file"
+	rm -f "$REPORT_BODY" "$analytics" "$analytics_dpi" "$analytics_vid" "$order"
 	REPORT_BODY=""
 
 	TESTS_ACTIVE=0
 	trap - INT TERM HUP PIPE
 	rm -f "$RUN_DIR/test.pid"
 	ipset_test_restore
+	video_cleanup
 	machine_say best "$BEST_CONFIG"
 	machine_say report "$result_file"
 
@@ -545,13 +782,13 @@ tests_run()
 
 tests_report()
 {
-	local type="$1" analytics="$2" analytics_dpi="$3" result_file="$4" width=0 name a b c d e line best="" summary
-	local max_ok=-1 max_ping=-1
+	local type="$1" analytics="$2" analytics_dpi="$3" analytics_vid="$4" order="$5" result_file="$6"
+	local width=0 name a b c d e line best="" summary max_ok=-1 max_ping=-1
 	summary="$RUN_DIR/summary.$$"
 	: > "$summary"
-	while IFS=$'\t' read -r name _; do
+	while IFS= read -r name; do
 		[ ${#name} -gt "$width" ] && width=${#name}
-	done < <(cat "$analytics" "$analytics_dpi")
+	done < "$order"
 
 	echo
 	info "=== ИТОГИ ==="
@@ -577,17 +814,30 @@ tests_report()
 				printf '%s\n' "$line" >> "$summary"
 			done < "$analytics_dpi"
 			;;
-		full)
-			local da db dc dd
-			while IFS=$'\t' read -r name a b c d e && IFS=$'\t' read -r _ da db dc dd <&3; do
-				line="$(printf '%-*s : сайты %3d/%-3d | замирание %3d/%-3d | HTTP ERR: %3d, UNSUP: %3d, Ping OK: %3d | DPI FAIL: %3d' \
-					"$width" "$name" "$a" "$((a + b))" "$dd" "$((da + db + dd))" "$b" "$c" "$d" "$db")"
+		video)
+			while IFS=$'\t' read -r name a b c d e; do
+				line="$(printf '%-*s : видео %s' "$width" "$name" "$(video_text "$a" "$b" "$c" "$d")")"
 				warn "$line"
 				printf '%s\n' "$line" >> "$summary"
-			done < "$analytics" 3< "$analytics_dpi"
-			# лучшая - в том же порядке, что и список: сайты, затем меньше замираний, затем пинг
-			best="$(paste "$analytics" <(cut -f2- "$analytics_dpi") | strategy_rank | head -n1)"
-			echo "Порядок: сначала больше открытых сайтов, при равенстве меньше замираний на 16-20 КБ."
+			done < "$analytics_vid"
+			best="$(results_join "$analytics" "$analytics_dpi" "$analytics_vid" < "$order" | strategy_rank | head -n1)"
+			echo "Порядок: сначала скачавшие ролик целиком, затем медленные, затем зависшие; внутри - по скорости."
+			;;
+		full)
+			# строки: имя, 5 полей сайтов, 4 поля DPI, 5 полей видео (пустые, если yt-dlp не нашёлся)
+			local s1 s2 s3 s4 d1 d2 d3 d4 v1 v2 v3 v4 video_part
+			while IFS=$'\t' read -r name a b c d e d1 d2 d3 d4 v1 v2 v3 v4 _; do
+				[ -n "$a" ] || continue
+				video_part=""
+				[ -n "$v1" ] && video_part=" | видео $(video_text "$v1" "$v2" "$v3" "$v4")"
+				line="$(printf '%-*s : сайты %3d/%-3d | замирание %3d/%-3d%s | HTTP ERR: %3d, UNSUP: %3d, Ping OK: %3d | DPI FAIL: %3d' \
+					"$width" "$name" "$a" "$((a + b))" "$d4" "$((d1 + d2 + d4))" "$video_part" "$b" "$c" "$d" "$d2")"
+				warn "$line"
+				printf '%s\n' "$line" >> "$summary"
+			done < <(results_join "$analytics" "$analytics_dpi" "$analytics_vid" < "$order")
+			# лучшая - в том же порядке, что и список: сайты, затем меньше замираний, затем видео, затем пинг
+			best="$(results_join "$analytics" "$analytics_dpi" "$analytics_vid" < "$order" | strategy_rank | head -n1)"
+			echo "Порядок: сначала больше открытых сайтов, при равенстве меньше замираний на 16-20 КБ, затем загрузка видео."
 			;;
 	esac
 
@@ -612,6 +862,7 @@ tests_report()
 	# итоги для списка стратегий, "zapret next" и "zapret auto". Итоги непроверенных стратегий сохраняются
 	[ -s "$analytics" ] && results_merge "$RESULTS_STD" "$analytics"
 	[ -s "$analytics_dpi" ] && results_merge "$RESULTS_DPI" "$analytics_dpi"
+	[ -s "$analytics_vid" ] && results_merge "$RESULTS_VID" "$analytics_vid"
 	return 0
 }
 
@@ -635,8 +886,8 @@ tests_cli()
 		return
 	fi
 	case "$type" in
-		standard|dpi|full) ;;
-		*) err "Тип теста: full, standard или dpi."; return 1 ;;
+		standard|dpi|full|video) ;;
+		*) err "Тип теста: full, standard, dpi или video."; return 1 ;;
 	esac
 	tests_run "$type" "${selection:-all}" "$apply"
 }
@@ -647,15 +898,17 @@ tests_dialog()
 	while :; do
 		echo
 		info "Какой тест запустить?"
-		echo "  1. Полный: сайты и замирание на 16-20 КБ - рекомендуется"
+		echo "  1. Полный: сайты, замирание на 16-20 КБ и загрузка видео - рекомендуется"
 		echo "  2. Только сайты: HTTP, TLS 1.2, TLS 1.3, ping"
 		echo "  3. Только DPI: замирание TCP на 16-20 КБ"
+		echo "  4. Только видео: загрузка ролика с YouTube через yt-dlp"
 		echo "  0. Назад"
 		read -r -p "Выберите пункт: " choice || return 0
 		case "$choice" in
 			1) type=full; break ;;
 			2) type=standard; break ;;
 			3) type=dpi; break ;;
+			4) type=video; break ;;
 			0) return 0 ;;
 			*) warn "Нет такого пункта." ;;
 		esac

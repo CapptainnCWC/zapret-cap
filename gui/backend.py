@@ -1,5 +1,6 @@
 """Связь окна с утилитой zapret. GTK здесь нет: всю работу делает та же утилита, что и в терминале,
 а окно только запускает её команды и разбирает ответ."""
+import math
 import os
 import subprocess
 import threading
@@ -42,20 +43,27 @@ class State:
 
 SITE_FIELDS = ("ok", "err", "unsup", "ping_ok", "ping_fail")
 DPI_FIELDS = ("dpi_ok", "dpi_fail", "dpi_unsup", "dpi_blocked")
+# загрузка ролика с YouTube: скачан целиком, поток завис, байт, миллисекунд, размер файла
+VIDEO_FIELDS = ("vid_ok", "vid_stall", "vid_bytes", "vid_ms", "vid_total")
+ALL_FIELDS = SITE_FIELDS + DPI_FIELDS + VIDEO_FIELDS
+
+
+def decimal(value):
+    """Одна цифра после запятой, как принято в русском тексте."""
+    return f"{value:.1f}".replace(".", ",")
 
 
 class Strategy:
-    """Строка zapret list --tsv: имя, итоги последних тестов сайтов и замирания на 16-20 КБ.
-    Пустое поле значит, что тест для этой стратегии не запускался. Одиннадцатое поле, общую оценку утилиты,
-    окно не использует: результаты показываются по отдельности."""
+    """Строка zapret list --tsv: имя, итоги последних тестов сайтов, замирания на 16-20 КБ и загрузки видео.
+    Пустое поле значит, что тест для этой стратегии не запускался."""
 
     def __init__(self, line, index=0):
-        fields = (line.split("\t") + [""] * 10)[:10]
+        fields = (line.split("\t") + [""] * len(ALL_FIELDS))[: len(ALL_FIELDS) + 1]
         self.name = fields[0]
         # место в списке утилиты: по нему тест выбирает стратегии, какой бы ни была сортировка в окне
         self.index = index
         numbers = [int(value) if value.strip().isdigit() else None for value in fields[1:]]
-        for key, value in zip(SITE_FIELDS + DPI_FIELDS, numbers):
+        for key, value in zip(ALL_FIELDS, numbers):
             setattr(self, key, value)
 
     @property
@@ -67,8 +75,12 @@ class Strategy:
         return self.dpi_ok is not None
 
     @property
+    def video_tested(self):
+        return self.vid_ok is not None
+
+    @property
     def tested(self):
-        return self.sites_tested or self.dpi_tested
+        return self.sites_tested or self.dpi_tested or self.video_tested
 
     @property
     def sites_total(self):
@@ -106,6 +118,70 @@ class Strategy:
             setattr(self, key, value)
         return True
 
+    def apply_video(self, values):
+        """Строка @video теста: 5 чисел, см. VIDEO_FIELDS."""
+        if len(values) != len(VIDEO_FIELDS):
+            return False
+        for key, value in zip(VIDEO_FIELDS, values):
+            setattr(self, key, value)
+        return True
+
+    @property
+    def video_speed(self):
+        """Килобайт в секунду."""
+        return (self.vid_bytes or 0) / self.vid_ms if self.vid_ms else 0.0
+
+    @property
+    def video_class(self):
+        """0 - скачалось, 1 - медленно, 2 - зависло, 3 - не скачалось, None - не проверялось."""
+        if not self.video_tested:
+            return None
+        if self.vid_ok:
+            return 0
+        if self.vid_stall:
+            return 2
+        return 1 if self.vid_bytes else 3
+
+    @staticmethod
+    def size_text(size):
+        return f"{decimal(size / 1e6)} МБ" if size >= 1e6 else f"{size // 1000} КБ"
+
+    def speed_text(self):
+        speed = self.video_speed
+        return f"{decimal(speed / 1000)} МБ/с" if speed >= 1000 else f"{int(speed)} КБ/с"
+
+    def video_text(self):
+        """Как в утилите: 8,3 МБ/с · 120 КБ/с, не докачалось · зависло на 18 КБ · не скачалось."""
+        kind = self.video_class
+        if kind is None:
+            return "—"
+        if kind == 0:
+            return self.speed_text()
+        if kind == 1:
+            return f"{self.speed_text()}, не докачалось"
+        if kind == 2:
+            return f"зависло на {self.size_text(self.vid_bytes or 0)}"
+        return "не скачалось"
+
+    def video_kind(self):
+        """Цвет значка видео: скачалось - зелёный, медленно - жёлтый, зависло или не скачалось - красный."""
+        kind = self.video_class
+        if kind is None:
+            return "badge-neutral"
+        return ("badge-good", "badge-mid", "badge-bad", "badge-bad")[kind]
+
+    def video_tooltip(self):
+        kind = self.video_class
+        if kind is None:
+            return "не проверялось"
+        if kind == 0:
+            return f"Ролик {self.size_text(self.vid_bytes or 0)} скачан за {decimal((self.vid_ms or 0) / 1000)} с"
+        if kind == 1:
+            return f"За отведённое время пришло {self.size_text(self.vid_bytes or 0)} из {self.size_text(self.vid_total or 0)}"
+        if kind == 2:
+            return f"Поток остановился после {self.size_text(self.vid_bytes or 0)}: цензор режет загрузку"
+        return "YouTube не отдал ни байта ролика"
+
     def sites_text(self):
         return f"{self.ok}/{self.sites_total}" if self.sites_tested else "—"
 
@@ -129,8 +205,9 @@ class Strategy:
         return "badge-mid" if share <= 1 / 3 else "badge-bad"
 
     def summary(self):
-        """Подпись карточки лучшей стратегии: Сайты 36/36 · замирание 0/18."""
-        return f"Сайты {self.sites_text()} · замирание {self.freeze_text()}"
+        """Подпись карточки лучшей стратегии: Сайты 36/36 · замирание 0/18 · видео 8,3 МБ/с."""
+        text = f"Сайты {self.sites_text()} · замирание {self.freeze_text()}"
+        return text + (f" · видео {self.video_text()}" if self.video_tested else "")
 
 
 def parse_strategies(text):
@@ -138,15 +215,24 @@ def parse_strategies(text):
 
 
 def sort_strategies(items):
-    """Сначала больше открытых сайтов, при равенстве меньше замираний на 16-20 КБ, затем больше ответов ping.
-    Стратегии без единого результата в конце, в порядке утилиты. Непроверенная часть считается худшей."""
+    """Как strategy_rank в утилите: сначала больше открытых сайтов, при равенстве меньше замираний на 16-20 КБ,
+    затем загрузка видео (скачалось, медленно, зависло, не скачалось; внутри - скорость с точностью до двух раз),
+    затем больше ответов ping. Стратегии без единого результата в конце, в порядке утилиты.
+    Непроверенная часть считается худшей."""
 
     def key(item):
         if not item.tested:
-            return (1, 0.0, 0.0, 0, item.index)
-        sites = item.sites_share if item.sites_share is not None else -1.0
-        freeze = item.freeze_share if item.freeze_share is not None else 2.0
-        return (0, -sites, freeze, -(item.ping_ok or 0), item.index)
+            return (1, 0, 0, 0, 0, item.index)
+        # целые доли в тысячных, как в awk, чтобы порядок не расходился из-за округления
+        sites = item.ok * 1000 // item.sites_total if item.sites_tested and item.sites_total else -1
+        freeze = (item.dpi_blocked or 0) * 1000 // item.dpi_total if item.dpi_tested and item.dpi_total else 1001
+        if item.video_class is None:
+            video = 9999
+        else:
+            speed = item.video_speed
+            # та же формула, что в awk: log2 дал бы другое округление на точных степенях двойки
+            video = item.video_class * 100 + 60 - (int(math.log(speed) / math.log(2)) if speed >= 1 else 0)
+        return (0, -sites, freeze, video, -(item.ping_ok or 0), item.index)
 
     return sorted(items, key=key)
 
